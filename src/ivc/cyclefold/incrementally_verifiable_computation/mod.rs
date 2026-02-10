@@ -391,6 +391,14 @@ where
             Err(Error::Verify(errors.into_boxed_slice()))
         }
     }
+
+    pub fn z0(&self) -> &[CMain::Scalar; ARITY] {
+        &self.primary_z_0
+    }
+
+    pub fn zi(&self) -> &[CMain::Scalar; ARITY] {
+        &self.primary_z_current
+    }
 }
 
 struct SupportCircuitFoldResult<C: CurveAffine> {

@@ -744,6 +744,10 @@ where
             Err(Error::VerifyFailed(errors))
         }
     }
+
+    pub fn primary_zi(&self) -> &[C1::Scalar; A1] {
+        &self.primary.z_i
+    }
 }
 
 fn get_consistency_marker_input<C: CurveAffine>(ins: &FoldablePlonkInstance<C>) -> C::ScalarExt {
