@@ -117,7 +117,7 @@ fn fold_witnesses<F: PrimeField>(
         .par_iter()
         .enumerate()
         .flat_map(|(column, witness)| {
-            rayon::iter::repeatn(column, witness.len())
+            rayon::iter::repeat_n(column, witness.len())
                 .enumerate()
                 .chunks(CHUNK_SIZE)
         })

@@ -1,4 +1,3 @@
-use std::array;
 use halo2_proofs::{
     circuit::{Value, Layouter},
     plonk::{

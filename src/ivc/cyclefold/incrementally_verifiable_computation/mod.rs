@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, num::NonZeroUsize};
 
 use itertools::Itertools;
-use tracing::{error, info_span, trace};
+use tracing::{info_span, trace};
 
 use super::{
     ro,
@@ -57,8 +57,8 @@ where
 
     primary_acc: nifs::protogalaxy::Accumulator<CMain>,
     primary_trace: PlonkTrace<CMain>,
-    primary_z_current: [CMain::Scalar; ARITY],
-    primary_z_0: [CMain::Scalar; ARITY],
+    pub primary_z_current: [CMain::Scalar; ARITY],
+    pub primary_z_0: [CMain::Scalar; ARITY],
 
     support_acc: nifs::sangria::RelaxedPlonkTrace<CSup, { support_circuit::INSTANCES_LEN }>,
 
@@ -359,7 +359,7 @@ where
                     z_0: *primary_z_0,
 
                     // next fields not used in absorb
-                    self_incoming: &primary_trace.u,
+                    self_incoming: &Default::default(),
                     self_proof: nifs::protogalaxy::Proof::default(),
                     support_incoming: &[],
                 }
@@ -398,6 +398,10 @@ where
 
     pub fn zi(&self) -> &[CMain::Scalar; ARITY] {
         &self.primary_z_current
+    }
+
+    pub fn error(&self) -> &CMain::ScalarExt {
+        &self.primary_acc.e
     }
 }
 

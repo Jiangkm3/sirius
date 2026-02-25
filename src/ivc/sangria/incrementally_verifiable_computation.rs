@@ -748,6 +748,14 @@ where
     pub fn primary_zi(&self) -> &[C1::Scalar; A1] {
         &self.primary.z_i
     }
+
+    pub fn change_zi(&mut self, new_zi: [C1::Scalar; A1]) {
+        self.primary.z_i = new_zi;
+    }
+
+    pub fn error(&self) -> C1 {
+        self.primary.relaxed_trace.U.E_commitment
+    }
 }
 
 fn get_consistency_marker_input<C: CurveAffine>(ins: &FoldablePlonkInstance<C>) -> C::ScalarExt {

@@ -156,7 +156,7 @@ pub struct PlonkStructure<F: PrimeField> {
     pub(crate) lookup_arguments: Option<lookup::Arguments<F>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PlonkInstance<C: CurveAffine> {
     /// `W_commitments = round_sizes.len()`, see [`PlonkStructure::round_sizes`]
     pub(crate) W_commitments: Vec<C>,
@@ -171,7 +171,7 @@ pub struct PlonkInstance<C: CurveAffine> {
     pub(crate) challenges: Vec<C::ScalarExt>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PlonkWitness<F: PrimeField> {
     /// length of W equals number of prover rounds, see [`PlonkStructure`]
     pub(crate) W: Vec<Vec<F>>,
@@ -186,7 +186,7 @@ impl<F: PrimeField> PlonkWitness<F> {
 }
 
 // TODO #31 docs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlonkTrace<C: CurveAffine> {
     pub u: PlonkInstance<C>,
     pub w: PlonkWitness<C::Scalar>,

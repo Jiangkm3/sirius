@@ -358,7 +358,7 @@ const ARITY: usize = BLOCK_SIZE / 2;
 
 const PRIMARY_CIRCUIT_TABLE_SIZE: usize = 21;
 const COMMITMENT_KEY_SIZE: usize = 26;
-const FOLD_STEP_COUNT: usize = 5;
+const FOLD_STEP_COUNT: usize = 1;
 
 impl<F: PrimeField> StepCircuit<ARITY, F> for TestSha256Circuit<F> {
     type Config = Table16Config;
@@ -430,8 +430,8 @@ fn get_or_create_commitment_key<C: CurveAffine>(
 }
 
 fn main() {
-    let args = Args::parse();
-    args.init_logger();
+    // let args = Args::parse();
+    // args.init_logger();
 
     // To osterize the total execution time of the example
     let _span = info_span!("sha256_example").entered();
@@ -455,9 +455,11 @@ fn main() {
 
     let primary_input = array::from_fn(|i| C1Scalar::from(i as u64));
 
+    println!("STEP: 0");
     let mut ivc = cyclefold::IVC::new(&mut pp, &primary, primary_input).expect("while step=0");
 
     for step in 1..=FOLD_STEP_COUNT {
+        println!("STEP: {step}");
         ivc = ivc
             .next(&pp, &primary)
             .unwrap_or_else(|err| panic!("while step={step}: {err:?}"));
