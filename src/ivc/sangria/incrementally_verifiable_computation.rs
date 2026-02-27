@@ -260,7 +260,7 @@ where
                 u: secondary_pre_round_plonk_trace.u.clone(),
                 cross_term_commits: vec![
                     C2::identity();
-                    pp.secondary.S().get_degree_for_folding().saturating_sub(1)
+                    pp.secondary.S().get_degree_for_folding().saturating_sub(2)
                 ],
                 step_circuit_instances: primary.instances(),
             },
@@ -357,7 +357,7 @@ where
                     primary_nifs_pp
                         .S
                         .get_degree_for_folding()
-                        .saturating_sub(1)
+                        .saturating_sub(2)
                 ],
                 step_circuit_instances: secondary.instances(),
             },
@@ -404,7 +404,7 @@ where
 
         Ok(Self {
             step: 1,
-            debug_mode: false,
+            debug_mode,
             secondary_nifs_pp,
             primary_nifs_pp,
             secondary_trace: [secondary_plonk_trace.clone()],

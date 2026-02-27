@@ -150,6 +150,16 @@ impl<F: PrimeField> GroupedPoly<F> {
         self.iter().skip(1)
     }
 
+    /// Returns only the cross-terms [T_1, ..., T_{d-1}], excluding both
+    /// T_0 = H(W1) (the current error) and T_d = H(W2) (which must be zero
+    /// for a valid incoming trace). Excluding T_d from the folded error vector
+    /// is critical for soundness: it allows `is_sat_accumulation` to detect
+    /// constraint violations in the incoming trace.
+    pub fn iter_cross_terms(&self) -> impl Iterator<Item = Option<&Expression<F>>> {
+        let len = self.terms.len();
+        self.iter().skip(1).take(len.saturating_sub(2))
+    }
+
     pub fn len(&self) -> usize {
         self.terms.len()
     }

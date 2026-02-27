@@ -128,7 +128,7 @@ where
         let cross_terms = S
             .custom_gates_lookup_compressed
             .grouped()
-            .iter_from_first()
+            .iter_cross_terms()
             .map(|optional_expr| match optional_expr {
                 Some(expr) => {
                     let evaluator = GraphEvaluator::new(expr);

@@ -400,7 +400,7 @@ impl<F: PrimeField> SupportTrace<F> {
                 (F::ZERO, F::ZERO);
                 support_plonk_structure
                     .get_degree_for_folding()
-                    .saturating_sub(1)
+                    .saturating_sub(2)
             ],
         };
         Self {

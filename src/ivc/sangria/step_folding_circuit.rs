@@ -190,7 +190,7 @@ where
                 C::identity();
                 constraint_system_metainfo
                     .folding_degree()
-                    .saturating_sub(1)
+                    .saturating_sub(2)
             ],
         }
     }
