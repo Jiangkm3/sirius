@@ -400,6 +400,10 @@ where
         &self.primary_z_current
     }
 
+    pub fn change_zi(&mut self, index: usize, new_zi: CMain::Scalar) {
+        self.primary_z_current[index] = new_zi
+    }
+
     pub fn error(&self) -> &CMain::ScalarExt {
         &self.primary_acc.e
     }

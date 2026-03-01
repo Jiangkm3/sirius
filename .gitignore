@@ -7,3 +7,4 @@
 .idea
 .cache
 tags
+srs_cache/*
