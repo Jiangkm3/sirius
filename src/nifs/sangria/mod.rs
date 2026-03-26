@@ -20,7 +20,10 @@ use crate::{
         halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
         plonk::Error as Halo2Error,
     },
-    ivc::{sangria::instances_accumulator_computation, Instances},
+    ivc::{
+        sangria::instances_accumulator_computation,
+        Instances,
+    },
     nifs::sangria::accumulator::RelaxedPlonkWitness,
     plonk::{
         self,
@@ -125,32 +128,63 @@ where
         let row_size = data.row_size();
 
         let evaluation_span = info_span!("evaluation").entered();
-        let cross_terms = S
-            .custom_gates_lookup_compressed
-            .grouped()
-            .iter_cross_terms()
-            .map(|optional_expr| match optional_expr {
-                Some(expr) => {
-                    let evaluator = GraphEvaluator::new(expr);
+        let cross_terms = {
+            S.custom_gates_lookup_compressed
+                .grouped()
+                .iter_cross_terms()
+                .map(|optional_expr| match optional_expr {
+                    Some(expr) => {
+                        let evaluator = GraphEvaluator::new(expr);
 
-                    (0..row_size)
-                        .into_par_iter()
-                        .map(|row_index| {
-                            let evaluated = evaluator.evaluate(&data, row_index)?;
-                            trace!("row {row_index} evaluated: {evaluated:?}");
-                            Result::<_, Error>::Ok(evaluated)
-                        })
-                        .collect::<Result<Box<[_]>, _>>()
-                }
-                None => Ok(vec![C::ScalarExt::ZERO; row_size].into_boxed_slice()),
-            })
-            .collect::<Result<CrossTerms<C>, _>>()?;
+                        let n_chunks = rayon::current_num_threads();
+                        let chunk_sz = (row_size + n_chunks - 1) / n_chunks;
+
+                        let ranges: Vec<(usize, usize)> = (0..n_chunks)
+                            .map(|i| {
+                                let start = i * chunk_sz;
+                                let end = ((i + 1) * chunk_sz).min(row_size);
+                                (start, end)
+                            })
+                            .filter(|(s, e)| s < e)
+                            .collect();
+
+                        // Evaluate each chunk in parallel, but rows within a chunk sequentially with reused scratch
+                        let parts: Vec<Vec<_>> = ranges
+                            .into_par_iter()
+                            .map(|(start, end)| {
+                                let mut scratch = evaluator.instance(); // one scratch per chunk
+                                let mut out = Vec::with_capacity(end - start);
+
+                                for row in start..end {
+                                    let v = evaluator.evaluate_with_scratch(
+                                        &data,
+                                        row,
+                                        &mut scratch,
+                                    )?;
+                                    out.push(v);
+                                }
+
+                                Ok::<Vec<<C as CurveAffine>::ScalarExt>, EvalError>(out)
+                            })
+                            .collect::<Result<Vec<Vec<C::ScalarExt>>, EvalError>>()?;
+
+                        // Flatten back into row order and box it
+                        let flat: Vec<_> = parts.into_iter().flatten().collect();
+                        let boxed: Box<[_]> = flat.into_boxed_slice();
+                        Ok::<Box<[<C as CurveAffine>::ScalarExt]>, EvalError>(boxed)
+                    }
+                    None => Ok(vec![C::ScalarExt::ZERO; row_size].into_boxed_slice()),
+                })
+                .collect::<Result<CrossTerms<C>, _>>()?
+        };
         evaluation_span.exit();
 
         let commit_span = info_span!("commit").entered();
         let cross_term_commits: Vec<C> = cross_terms
             .iter()
-            .map(|v| ck.commit(v))
+            .map(|v| {
+                ck.commit(v)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         commit_span.exit();
 

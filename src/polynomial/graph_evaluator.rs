@@ -156,7 +156,7 @@ struct CalculationInfo {
 }
 
 #[derive(Default, Debug)]
-struct EvaluationData<F: PrimeField> {
+pub(crate) struct EvaluationData<F: PrimeField> {
     intermediates: Vec<F>,
     rotations: Vec<usize>,
 }
@@ -351,7 +351,7 @@ impl<F: PrimeField> GraphEvaluator<F> {
     }
 
     /// Creates a new evaluation structure
-    fn instance(&self) -> EvaluationData<F> {
+    pub(crate) fn instance(&self) -> EvaluationData<F> {
         EvaluationData {
             intermediates: vec![F::ZERO; self.num_intermediates],
             rotations: vec![0usize; self.rotations.len()],
@@ -382,6 +382,35 @@ impl<F: PrimeField> GraphEvaluator<F> {
         // Return the result of the last calculation (if any)
         if let Some(calc) = self.calculations.last() {
             Ok(data.intermediates[calc.target])
+        } else {
+            Ok(F::ZERO)
+        }
+    }
+
+    pub(crate) fn evaluate_with_scratch(
+        &self,
+        getter: &impl GetDataForEval<F>,
+        row_index: usize,
+        scratch: &mut EvaluationData<F>,
+    ) -> Result<F, EvalError> {
+        // All rotation index values
+        for (rot_idx, rot) in self.rotations.iter().enumerate() {
+            scratch.rotations[rot_idx] = get_rotation_idx(row_index, *rot, getter.row_size());
+        }
+
+        // All calculations, with cached intermediate results
+        for calc in self.calculations.iter() {
+            scratch.intermediates[calc.target] = calc.calculation.evaluate(
+                &scratch.rotations,
+                &self.constants,
+                &scratch.intermediates,
+                getter,
+            )?;
+        }
+
+        // Return the result of the last calculation (if any)
+        if let Some(calc) = self.calculations.last() {
+            Ok(scratch.intermediates[calc.target])
         } else {
             Ok(F::ZERO)
         }

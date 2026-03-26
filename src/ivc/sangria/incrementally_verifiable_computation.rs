@@ -33,6 +33,31 @@ use crate::{
 
 pub type Instances<F> = Vec<Vec<F>>;
 
+// TIMER
+use std::time::Instant;
+
+/// Logs elapsed time on drop.
+pub struct SectionTimer<'a> {
+    name: &'a str,
+    start: Instant,
+}
+
+impl<'a> SectionTimer<'a> {
+    pub fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for SectionTimer<'_> {
+    fn drop(&mut self) {
+        // pick your preferred level
+        println!("{}, Elapse = {} ms", self.name, self.start.elapsed().as_millis());
+    }
+}
+
 // TODO #31 docs
 struct StepCircuitContext<const ARITY: usize, C, SC>
 where
@@ -439,14 +464,16 @@ where
         let primary_span = info_span!("primary").entered();
         debug!("start fold step with folding 'secondary' by 'primary'");
 
-        let (secondary_new_trace, secondary_cross_term_commits) =
+        // --- Secondary NIFS prove (fold secondary by primary) ---
+        let (secondary_new_trace, secondary_cross_term_commits) = {
             VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::prove(
                 pp.secondary.ck(),
                 &self.secondary_nifs_pp,
                 &mut RP1::OffCircuit::new(pp.primary.params().ro_constant().clone()),
                 self.secondary.relaxed_trace.clone(),
                 &self.secondary_trace,
-            )?;
+            )?
+        };
 
         self.secondary
             .pub_instances
@@ -454,49 +481,51 @@ where
 
         debug!("prepare primary td");
 
-        // Prepare primary constraint system for folding
+        // --- primary.process_step ---
         let primary_z_next = primary.process_step(&self.primary.z_i, pp.primary.k_table_size())?;
 
-        let primary_consistency_marker = {
-            let _s = info_span!("generate_instance").entered();
-            [
-                get_consistency_marker_output(&self.secondary_trace[0].u),
-                ConsistencyMarkerComputation::<
-                    '_,
-                    A1,
-                    C2,
-                    RP1::OffCircuit,
-                    { CONSISTENCY_MARKERS_COUNT },
-                > {
-                    random_oracle_constant: pp.primary.params().ro_constant().clone(),
-                    public_params_hash: &pp.digest_2(),
-                    step: self.step + 1,
-                    z_0: &self.primary.z_0,
-                    z_i: &primary_z_next,
-                    relaxed: &secondary_new_trace.U,
-                    limb_width: pp.secondary.params().limb_width(),
-                    limbs_count: pp.secondary.params().limbs_count(),
-                }
-                .generate_with_inspect(|buf| debug!("primary X1 {}+1-step: {buf:?}", self.step)),
-            ]
+        // --- consistency marker generation ---
+        let primary_consistency_marker = [
+            get_consistency_marker_output(&self.secondary_trace[0].u),
+            ConsistencyMarkerComputation::<
+                '_,
+                A1,
+                C2,
+                RP1::OffCircuit,
+                { CONSISTENCY_MARKERS_COUNT },
+            > {
+                random_oracle_constant: pp.primary.params().ro_constant().clone(),
+                public_params_hash: &pp.digest_2(),
+                step: self.step + 1,
+                z_0: &self.primary.z_0,
+                z_i: &primary_z_next,
+                relaxed: &secondary_new_trace.U,
+                limb_width: pp.secondary.params().limb_width(),
+                limbs_count: pp.secondary.params().limbs_count(),
+            }
+            .generate_with_inspect(|buf| debug!("primary X1 {}+1-step: {buf:?}", self.step)),
+        ];
+
+        // --- build SFC + instances ---
+        let (primary_sfc, primary_instances) = {
+            let primary_sfc = StepFoldingCircuit::<'_, A1, C2, SC1, RP1::OnCircuit, T> {
+                step_circuit: primary,
+                input: StepInputs::<'_, A1, C2, RP1::OnCircuit> {
+                    step: C2::Base::from_u128(self.step as u128),
+                    step_pp: pp.primary.params(),
+                    public_params_hash: pp.digest_2(),
+                    z_0: self.primary.z_0,
+                    z_i: self.primary.z_i,
+                    U: self.secondary.relaxed_trace.U.clone(),
+                    u: self.secondary_trace[0].u.clone(),
+                    cross_term_commits: secondary_cross_term_commits,
+                    step_circuit_instances: primary.instances(),
+                },
+            };
+            let primary_instances = primary_sfc.instances(primary_consistency_marker);
+            (primary_sfc, primary_instances)
         };
 
-        let primary_sfc = StepFoldingCircuit::<'_, A1, C2, SC1, RP1::OnCircuit, T> {
-            step_circuit: primary,
-            input: StepInputs::<'_, A1, C2, RP1::OnCircuit> {
-                step: C2::Base::from_u128(self.step as u128),
-                step_pp: pp.primary.params(),
-                public_params_hash: pp.digest_2(),
-                z_0: self.primary.z_0,
-                z_i: self.primary.z_i,
-                U: self.secondary.relaxed_trace.U.clone(),
-                u: self.secondary_trace[0].u.clone(),
-                cross_term_commits: secondary_cross_term_commits,
-                step_circuit_instances: primary.instances(),
-            },
-        };
-
-        let primary_instances = primary_sfc.instances(primary_consistency_marker);
         if self.debug_mode {
             let _s = debug_span!("debug").entered();
             MockProver::run(
@@ -511,18 +540,22 @@ where
         assert!(primary_instances
             .iter()
             .zip(pp.primary.S().num_io.iter())
-            .all(|(instance, expected_len)| { instance.len() == *expected_len }));
+            .all(|(instance, expected_len)| instance.len() == *expected_len));
 
-        let primary_witness = CircuitRunner::new(
-            pp.primary.k_table_size(),
-            primary_sfc,
-            primary_instances.clone(),
-        )
-        .try_collect_witness()?;
+        // --- collect witness ---
+        let primary_witness = {
+            CircuitRunner::new(
+                pp.primary.k_table_size(),
+                primary_sfc,
+                primary_instances.clone(),
+            )
+            .try_collect_witness()?
+        };
 
         self.primary.z_i = primary_z_next;
         self.secondary.relaxed_trace = secondary_new_trace;
 
+        // --- generate plonk trace (primary) ---
         let primary_plonk_trace = [
             VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::generate_plonk_trace(
                 pp.primary.ck(),
@@ -533,66 +566,70 @@ where
             )?,
         ];
 
-        let (primary_new_trace, primary_cross_term_commits) =
+        // --- Primary NIFS prove (fold primary by secondary) ---
+        let (primary_new_trace, primary_cross_term_commits) = {
             nifs::sangria::VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::prove(
                 pp.primary.ck(),
                 &self.primary_nifs_pp,
                 &mut RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone()),
                 self.primary.relaxed_trace.clone(),
                 &primary_plonk_trace,
-            )?;
+            )?
+        };
+
         self.primary
             .pub_instances
             .push(primary_plonk_trace[0].u.instances.clone());
 
         primary_span.exit();
         let _secondary_span = info_span!("secondary").entered();
-
         debug!("start fold step with folding 'primary' by 'secondary'");
 
-        let next_secondary_z_i =
-            secondary.process_step(&self.secondary.z_i, pp.secondary.k_table_size())?;
+        // --- secondary.process_step ---
+        let next_secondary_z_i = secondary.process_step(&self.secondary.z_i, pp.secondary.k_table_size())?;
 
-        let secondary_consistency_marker = {
-            let _s = info_span!("generate_instance");
-            [
-                get_consistency_marker_output(&primary_plonk_trace[0].u),
-                ConsistencyMarkerComputation::<
-                    '_,
-                    A2,
-                    C1,
-                    RP2::OffCircuit,
-                    { CONSISTENCY_MARKERS_COUNT },
-                > {
-                    random_oracle_constant: pp.secondary.params().ro_constant().clone(),
-                    public_params_hash: &pp.digest_1(),
-                    step: self.step + 1,
-                    z_0: &self.secondary.z_0,
-                    z_i: &next_secondary_z_i,
-                    relaxed: &primary_new_trace.U,
-                    limb_width: pp.primary.params().limb_width(),
-                    limbs_count: pp.primary.params().limbs_count(),
-                }
-                .generate_with_inspect(|buf| debug!("secondary X1 {}+1-step: {buf:?}", self.step)),
-            ]
+        // --- consistency marker generation (secondary) ---
+        let secondary_consistency_marker = [
+            get_consistency_marker_output(&primary_plonk_trace[0].u),
+            ConsistencyMarkerComputation::<
+                '_,
+                A2,
+                C1,
+                RP2::OffCircuit,
+                { CONSISTENCY_MARKERS_COUNT },
+            > {
+                random_oracle_constant: pp.secondary.params().ro_constant().clone(),
+                public_params_hash: &pp.digest_1(),
+                step: self.step + 1,
+                z_0: &self.secondary.z_0,
+                z_i: &next_secondary_z_i,
+                relaxed: &primary_new_trace.U,
+                limb_width: pp.primary.params().limb_width(),
+                limbs_count: pp.primary.params().limbs_count(),
+            }
+            .generate_with_inspect(|buf| debug!("secondary X1 {}+1-step: {buf:?}", self.step)),
+        ];
+
+        // --- build SFC + instances (secondary) ---
+        let (secondary_sfc, secondary_instances) = {
+            let secondary_sfc = StepFoldingCircuit::<'_, A2, C1, SC2, RP2::OnCircuit, T> {
+                step_circuit: secondary,
+                input: StepInputs::<'_, A2, C1, RP2::OnCircuit> {
+                    step: C1::Base::from_u128(self.step as u128),
+                    step_pp: pp.secondary.params(),
+                    public_params_hash: pp.digest_1(),
+                    z_0: self.secondary.z_0,
+                    z_i: self.secondary.z_i,
+                    U: self.primary.relaxed_trace.U.clone(),
+                    u: primary_plonk_trace[0].u.clone(),
+                    cross_term_commits: primary_cross_term_commits,
+                    step_circuit_instances: secondary.instances(),
+                },
+            };
+            let secondary_instances = secondary_sfc.instances(secondary_consistency_marker);
+            (secondary_sfc, secondary_instances)
         };
 
-        let secondary_sfc = StepFoldingCircuit::<'_, A2, C1, SC2, RP2::OnCircuit, T> {
-            step_circuit: secondary,
-            input: StepInputs::<'_, A2, C1, RP2::OnCircuit> {
-                step: C1::Base::from_u128(self.step as u128),
-                step_pp: pp.secondary.params(),
-                public_params_hash: pp.digest_1(),
-                z_0: self.secondary.z_0,
-                z_i: self.secondary.z_i,
-                U: self.primary.relaxed_trace.U.clone(),
-                u: primary_plonk_trace[0].u.clone(),
-                cross_term_commits: primary_cross_term_commits,
-                step_circuit_instances: secondary.instances(),
-            },
-        };
-
-        let secondary_instances = secondary_sfc.instances(secondary_consistency_marker);
         if self.debug_mode {
             let _s = debug_span!("debug").entered();
             MockProver::run(
@@ -607,18 +644,22 @@ where
         assert!(secondary_instances
             .iter()
             .zip(pp.secondary.S().num_io.iter())
-            .all(|(instance, expected_len)| { instance.len() == *expected_len }));
+            .all(|(instance, expected_len)| instance.len() == *expected_len));
 
-        let secondary_witness = CircuitRunner::new(
-            pp.secondary.k_table_size(),
-            secondary_sfc,
-            secondary_instances.clone(),
-        )
-        .try_collect_witness()?;
+        // --- collect witness (secondary) ---
+        let secondary_witness = {
+            CircuitRunner::new(
+                pp.secondary.k_table_size(),
+                secondary_sfc,
+                secondary_instances.clone(),
+            )
+            .try_collect_witness()?
+        };
 
         self.secondary.z_i = next_secondary_z_i;
         self.primary.relaxed_trace = primary_new_trace;
 
+        // --- generate plonk trace (secondary) ---
         self.secondary_trace = [
             VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::generate_plonk_trace(
                 pp.secondary.ck(),
@@ -630,7 +671,6 @@ where
         ];
 
         self.step += 1;
-
         Ok(())
     }
 
@@ -743,6 +783,10 @@ where
         } else {
             Err(Error::VerifyFailed(errors))
         }
+    }
+
+    pub fn primary_z0(&self) -> &[C1::Scalar; A1] {
+        &self.primary.z_0
     }
 
     pub fn primary_zi(&self) -> &[C1::Scalar; A1] {
