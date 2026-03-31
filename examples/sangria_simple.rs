@@ -134,8 +134,8 @@ fn main() {
     let sk = CommitmentKey::<C2Affine>::setup(COMMITMENT_KEY_SIZE, b"grumpkin");
 
     let pp = new_default_pp::<ARITY, _, 1, _>(
-        TABLE_SIZE as u32, &pk, &sc1,
-        TABLE_SIZE as u32, &sk, &sc2,
+        TABLE_SIZE as u32, pk, &sc1,
+        TABLE_SIZE as u32, sk, &sc2,
     );
 
     let z0_primary = [C1Scalar::from(1)];

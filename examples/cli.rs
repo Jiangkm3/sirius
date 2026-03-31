@@ -336,7 +336,6 @@ fn fold<
             );
 
             let pp = sangria::PublicParams::<
-                '_,
                 1,
                 1,
                 MAIN_GATE_SIZE,
@@ -349,13 +348,13 @@ fn fold<
             >::new(
                 sangria::CircuitPublicParamsInput::new(
                     sangria_args.primary_circuit_k_table_size,
-                    &primary_commitment_key,
+                    primary_commitment_key,
                     primary_spec,
                     &primary,
                 ),
                 sangria::CircuitPublicParamsInput::new(
                     sangria_args.secondary_circuit_k_table_size,
-                    &secondary_commitment_key,
+                    secondary_commitment_key,
                     secondary_spec,
                     &secondary,
                 ),

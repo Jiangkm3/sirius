@@ -309,7 +309,7 @@ pub(crate) fn compute_G<F: PrimeField>(
     ctx: &PolyContext<F>,
     betas_stroke: impl Iterator<Item = F>,
     accumulator: &(impl Sync + GetChallenges<F> + GetWitness<F>),
-    traces: &[(impl Sync + GetChallenges<F> + GetWitness<F>)],
+    traces: &[impl Sync + GetChallenges<F> + GetWitness<F>],
 ) -> Result<UnivariatePoly<F>, Error> {
     if traces.is_empty() {
         return Err(Error::EmptyTracesNotAllowed);
@@ -466,7 +466,7 @@ pub(crate) fn compute_K<F: WithSmallOrderMulGroup<3>>(
     poly_F_in_alpha: F,
     betas_stroke: impl Iterator<Item = F>,
     accumulator: &(impl Sync + GetChallenges<F> + GetWitness<F>),
-    traces: &[(impl Sync + GetChallenges<F> + GetWitness<F>)],
+    traces: &[impl Sync + GetChallenges<F> + GetWitness<F>],
 ) -> Result<UnivariatePoly<F>, Error> {
     let poly_G = compute_G(ctx, betas_stroke, accumulator, traces)?;
     Ok(compute_K_from_G(ctx, poly_G, poly_F_in_alpha))

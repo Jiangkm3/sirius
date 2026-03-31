@@ -134,7 +134,6 @@ mod sirius_mod {
                 .expect("Failed to get primary key");
 
         let pp = PublicParams::<
-            '_,
             ARITY,
             ARITY,
             T,
@@ -147,13 +146,13 @@ mod sirius_mod {
         >::new(
             CircuitPublicParamsInput::new(
                 CIRCUIT_TABLE_SIZE1 as u32,
-                &primary_commitment_key,
+                primary_commitment_key,
                 primary_spec.clone(),
                 &sc1,
             ),
             CircuitPublicParamsInput::new(
                 CIRCUIT_TABLE_SIZE2 as u32,
-                &secondary_commitment_key,
+                secondary_commitment_key,
                 secondary_spec.clone(),
                 &sc2,
             ),

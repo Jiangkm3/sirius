@@ -17,7 +17,7 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use serde::Serialize;
 use some_to_err::*;
-use tracing::{debug, error, info, info_span, instrument, warn};
+use tracing::{debug, info, info_span, instrument, warn};
 
 use self::permutation::PermutationData;
 use crate::{

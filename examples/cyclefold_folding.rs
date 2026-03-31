@@ -169,7 +169,7 @@ fn main() {
     let mut ivc = IVC::new(&mut pp, &sc_template, z0).expect("IVC Init Failed");
 
     // 5. Fold through inputs
-    let num_steps = inputs.len();
+    // let num_steps = inputs.len();
     for (i, val) in inputs.into_iter().enumerate() {
         let step_circuit = MyStepCircuit { private_inputs: val };
         

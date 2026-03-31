@@ -80,10 +80,10 @@ fn main() {
 
     let pp = new_default_pp::<A1, _, A2, _>(
         SECONDARY_CIRCUIT_TABLE_SIZE as u32,
-        &primary_commitment_key,
+        primary_commitment_key,
         &sc1,
         PRIMARY_CIRCUIT_TABLE_SIZE as u32,
-        &secondary_commitment_key,
+        secondary_commitment_key,
         &sc2,
     );
 

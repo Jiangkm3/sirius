@@ -9,6 +9,7 @@ use halo2_proofs::{
 };
 use itertools::Itertools;
 use rayon::prelude::*;
+use serde::Serialize;
 use tracing::{debug, instrument, warn};
 
 use super::{GetConsistencyMarkers, GetStepCircuitInstances, CONSISTENCY_MARKERS_COUNT};
@@ -30,7 +31,7 @@ use crate::{
 ///
 /// This will make it easier to use sangria IVC code in other IVCs, instead of calculating a chain
 /// of hashes from empty sets.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum SCInstancesHashAcc<F> {
     /// If StepCircuit does not possess sc_instances will be None
     None,

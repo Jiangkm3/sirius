@@ -129,7 +129,6 @@ pub mod sangria_prelude {
 
         pub type PublicParams<'l, const A1: usize, C1, const A2: usize, C2> =
             crate::ivc::sangria::PublicParams<
-                'l,
                 A1,
                 A2,
                 { super::DEFAULT_STEP_FOLDING_CIRCUIT_SIZE },
@@ -152,10 +151,10 @@ pub mod sangria_prelude {
         /// All values except the input are selected by default
         pub fn new_default_pp<'k, const A1: usize, C1, const A2: usize, C2>(
             primary_k_table_size: u32,
-            primary_commitment_key: &'k CommitmentKey<C1Affine>,
+            primary_commitment_key: CommitmentKey<C1Affine>,
             sc1: &C1,
             secondary_k_table_size: u32,
-            secondary_commitment_key: &'k CommitmentKey<C2Affine>,
+            secondary_commitment_key: CommitmentKey<C2Affine>,
             sc2: &C2,
         ) -> PublicParams<'k, A1, C1, A2, C2>
         where
@@ -206,7 +205,6 @@ pub mod sangria_prelude {
 
         pub type PublicParams<'l, const A1: usize, C1, const A2: usize, C2> =
             crate::ivc::sangria::PublicParams<
-                'l,
                 A1,
                 A2,
                 { super::DEFAULT_STEP_FOLDING_CIRCUIT_SIZE },
@@ -229,10 +227,10 @@ pub mod sangria_prelude {
         /// All values except the input are selected by default
         pub fn new_default_pp<'k, const A1: usize, C1, const A2: usize, C2>(
             primary_k_table_size: u32,
-            primary_commitment_key: &'k CommitmentKey<C1Affine>,
+            primary_commitment_key: CommitmentKey<C1Affine>,
             sc1: &C1,
             secondary_k_table_size: u32,
-            secondary_commitment_key: &'k CommitmentKey<C2Affine>,
+            secondary_commitment_key: CommitmentKey<C2Affine>,
             sc2: &C2,
         ) -> PublicParams<'k, A1, C1, A2, C2>
         where

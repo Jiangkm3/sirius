@@ -91,10 +91,10 @@ fn main() {
     // These parameters combine circuit configurations, commitment keys, and table sizes
     let public_params = new_default_pp::<PRIMARY_CIRCUIT_ARITY, _, SECONDARY_CIRCUIT_ARITY, _>(
         SECONDARY_CIRCUIT_TABLE_SIZE as u32,
-        &primary_key,
+        primary_key,
         &primary_circuit,
         PRIMARY_CIRCUIT_TABLE_SIZE as u32,
-        &secondary_key,
+        secondary_key,
         &secondary_circuit,
     );
 

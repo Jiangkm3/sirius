@@ -151,10 +151,10 @@ where
         Mode::Sangria => {
             let pp = sirius::sangria_prelude::bn256::new_default_pp::<OVERALL_ARITY, _, 1, _>(
                 17,
-                &primary_commitment_key,
+                primary_commitment_key,
                 &multi_circuit,
                 17,
-                &secondary_commitment_key,
+                secondary_commitment_key,
                 &ivc::step_circuit::trivial::Circuit::default(),
             );
             let primary_input = z_in;

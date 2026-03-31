@@ -96,7 +96,6 @@ fn main() {
             .expect("Failed to get secondary key");
 
     let pp = sangria::PublicParams::<
-        '_,
         ARITY,
         ARITY,
         MAIN_GATE_SIZE,
@@ -109,13 +108,13 @@ fn main() {
     >::new(
         sangria::CircuitPublicParamsInput::new(
             PRIMARY_CIRCUIT_TABLE_SIZE as u32,
-            &primary_commitment_key,
+            primary_commitment_key,
             primary_spec,
             &primary,
         ),
         sangria::CircuitPublicParamsInput::new(
             SECONDARY_CIRCUIT_TABLE_SIZE as u32,
-            &secondary_commitment_key,
+            secondary_commitment_key,
             secondary_spec,
             &secondary,
         ),

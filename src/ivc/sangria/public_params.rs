@@ -46,7 +46,7 @@ pub enum Error {
 }
 
 #[derive(Serialize)]
-pub struct CircuitPublicParams<'key, const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
+pub struct CircuitPublicParams<const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
 where
     C: CurveAffine,
     C::Scalar: PrimeFieldBits + FromUniformBytes<64> + Serialize,
@@ -54,12 +54,12 @@ where
 {
     S: PlonkStructure<C::Scalar>,
     #[serde(skip_serializing)]
-    ck: &'key CommitmentKey<C>,
+    ck: CommitmentKey<C>,
     params: StepParams<C::Scalar, RP::OnCircuit>,
 }
 
-impl<'key, const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
-    CircuitPublicParams<'key, ARITY, MAIN_GATE_T, C, RP>
+impl<const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
+    CircuitPublicParams<ARITY, MAIN_GATE_T, C, RP>
 where
     C: CurveAffine,
     C::Scalar: PrimeFieldBits + FromUniformBytes<64> + Serialize,
@@ -68,8 +68,8 @@ where
     pub fn k_table_size(&self) -> u32 {
         self.S.k as u32
     }
-    pub fn ck(&self) -> &'key CommitmentKey<C> {
-        self.ck
+    pub fn ck(&self) -> &CommitmentKey<C> {
+        &self.ck
     }
     pub fn params(&self) -> &StepParams<C::Scalar, RP::OnCircuit> {
         &self.params
@@ -80,7 +80,7 @@ where
 }
 
 impl<const ARITY: usize, const MAIN_GATE_T: usize, C, RP> fmt::Debug
-    for CircuitPublicParams<'_, ARITY, MAIN_GATE_T, C, RP>
+    for CircuitPublicParams<ARITY, MAIN_GATE_T, C, RP>
 where
     C: fmt::Debug + CurveAffine,
     C::Base: PrimeFieldBits + FromUniformBytes<64> + Serialize,
@@ -95,8 +95,8 @@ where
     }
 }
 
-impl<'key, const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
-    CircuitPublicParams<'key, ARITY, MAIN_GATE_T, C, RP>
+impl<const ARITY: usize, const MAIN_GATE_T: usize, C, RP>
+    CircuitPublicParams<ARITY, MAIN_GATE_T, C, RP>
 where
     C: fmt::Debug + CurveAffine,
     C::Base: PrimeFieldBits + FromUniformBytes<64> + Serialize,
@@ -105,7 +105,7 @@ where
 {
     fn new(
         S: PlonkStructure<C::Scalar>,
-        commitment_key: &'key CommitmentKey<C>,
+        commitment_key: CommitmentKey<C>,
         ro_constant: RP::Args,
         limb_width: NonZeroUsize,
         n_limbs: NonZeroUsize,
@@ -123,7 +123,6 @@ where
 #[derive(serde::Serialize)]
 #[serde(bound(serialize = ""))]
 pub struct PublicParams<
-    'key,
     const A1: usize,
     const A2: usize,
     const MAIN_GATE_T: usize,
@@ -146,8 +145,8 @@ pub struct PublicParams<
     RP1: ROPair<C1::Scalar>,
     RP2: ROPair<C2::Scalar>,
 {
-    pub primary: CircuitPublicParams<'key, A1, MAIN_GATE_T, C1, RP1>,
-    pub secondary: CircuitPublicParams<'key, A2, MAIN_GATE_T, C2, RP2>,
+    pub primary: CircuitPublicParams<A1, MAIN_GATE_T, C1, RP1>,
+    pub secondary: CircuitPublicParams<A2, MAIN_GATE_T, C2, RP2>,
     _p: PhantomData<(SC1, SC2)>,
 
     #[serde(skip_serializing)]
@@ -160,7 +159,7 @@ pub struct PublicParams<
 }
 
 impl<const A1: usize, const A2: usize, const MAIN_GATE_T: usize, C1, C2, SC1, SC2, RP1, RP2>
-    fmt::Debug for PublicParams<'_, A1, A2, MAIN_GATE_T, C1, C2, SC1, SC2, RP1, RP2>
+    fmt::Debug for PublicParams<A1, A2, MAIN_GATE_T, C1, C2, SC1, SC2, RP1, RP2>
 where
     C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
     C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
@@ -185,7 +184,6 @@ where
 }
 
 pub struct CircuitPublicParamsInput<
-    'key,
     'circuit,
     const A: usize,
     C: CurveAffine,
@@ -193,17 +191,17 @@ pub struct CircuitPublicParamsInput<
     SC: StepCircuit<A, C::Scalar>,
 > {
     step_circuit: &'circuit SC,
-    commitment_key: &'key CommitmentKey<C>,
+    commitment_key: CommitmentKey<C>,
     k_table_size: u32,
     ro_constant: RPArgs,
 }
 
 impl<'key, 'circuit, const A: usize, C: CurveAffine, RPArgs, SC: StepCircuit<A, C::Scalar>>
-    CircuitPublicParamsInput<'key, 'circuit, A, C, RPArgs, SC>
+    CircuitPublicParamsInput<'circuit, A, C, RPArgs, SC>
 {
     pub fn new(
         k_table_size: u32,
-        commitment_key: &'key CommitmentKey<C>,
+        commitment_key: CommitmentKey<C>,
         ro_constant: RPArgs,
         step_circuit: &'circuit SC,
     ) -> Self {
@@ -227,7 +225,7 @@ impl<
         SC2,
         RP1,
         RP2,
-    > PublicParams<'key, A1, A2, MAIN_GATE_T, C1, C2, SC1, SC2, RP1, RP2>
+    > PublicParams<A1, A2, MAIN_GATE_T, C1, C2, SC1, SC2, RP1, RP2>
 where
     C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
     C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
@@ -243,8 +241,8 @@ where
 {
     #[instrument(name = "pp_new", skip_all)]
     pub fn new(
-        primary: CircuitPublicParamsInput<'key, '_, A1, C1, RP1::Args, SC1>,
-        secondary: CircuitPublicParamsInput<'key, '_, A2, C2, RP2::Args, SC2>,
+        primary: CircuitPublicParamsInput<'_, A1, C1, RP1::Args, SC1>,
+        secondary: CircuitPublicParamsInput<'_, A2, C2, RP2::Args, SC2>,
         limb_width: NonZeroUsize,
         limbs_count: NonZeroUsize,
     ) -> Result<Self, Error> {
@@ -338,7 +336,7 @@ where
             let secondary_S = secondary_cr.try_collect_plonk_structure()?;
             let secondary_initial_plonk_trace =
                 VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::generate_plonk_trace(
-                    secondary.commitment_key,
+                    &secondary.commitment_key,
                     &secondary_instances,
                     &secondary_cr.try_collect_witness()?,
                     &VanillaFS::<_, { CONSISTENCY_MARKERS_COUNT }>::setup_params(
@@ -502,7 +500,6 @@ mod pp_test {
         const K: usize = 17;
 
         PublicParams::<
-            '_,
             1,
             1,
             5,
@@ -516,13 +513,13 @@ mod pp_test {
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
-                commitment_key: &get_or_create_commitment_key(K + 3, "bn256").unwrap(),
+                commitment_key: get_or_create_commitment_key(K + 3, "bn256").unwrap(),
                 ro_constant: spec1,
             },
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
-                commitment_key: &get_or_create_commitment_key(K + 3, "grumpkin").unwrap(),
+                commitment_key: get_or_create_commitment_key(K + 3, "grumpkin").unwrap(),
                 ro_constant: spec2,
             },
             LIMB_WIDTH,

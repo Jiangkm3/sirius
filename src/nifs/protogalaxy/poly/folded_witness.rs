@@ -21,7 +21,7 @@ impl<F: PrimeField> FoldedWitness<F> {
         points_for_fft: &[F],
         lagrange_domain: u32,
         accumulator: &(impl Sync + GetChallenges<F> + GetWitness<F>),
-        traces: &[(impl Sync + GetChallenges<F> + GetWitness<F>)],
+        traces: &[impl Sync + GetChallenges<F> + GetWitness<F>],
     ) -> Box<[Self]> {
         let polys_L_in_challenges = points_for_fft
             .iter()

@@ -544,7 +544,7 @@ impl<F: PrimeField, const T: usize> MainGate<F, T> {
         let q_o = meta.fixed_column();
         let rc = meta.fixed_column();
 
-        state.map(|s| {
+        state.into_iter().for_each(|s| {
             meta.enable_equality(s);
         });
         meta.enable_equality(input);

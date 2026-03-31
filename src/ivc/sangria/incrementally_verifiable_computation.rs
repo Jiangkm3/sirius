@@ -170,7 +170,7 @@ where
     C2::Base: PrimeFieldBits + FromUniformBytes<64>,
 {
     pub fn fold_with_debug_mode<const T: usize, RP1, RP2>(
-        pp: &PublicParams<'_, A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
         primary_z_0: [C1::Scalar; A1],
         secondary: &SC2,
@@ -196,7 +196,7 @@ where
         Ok(())
     }
     pub fn fold<const T: usize, RP1, RP2>(
-        pp: &PublicParams<'_, A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
         primary_z_0: [C1::Scalar; A1],
         secondary: &SC2,
@@ -224,7 +224,7 @@ where
 
     #[instrument(name = "ivc_new", skip_all, fields(step = 0))]
     pub fn new<const T: usize, RP1, RP2>(
-        pp: &PublicParams<'_, A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
         primary_z_0: [C1::Scalar; A1],
         secondary: &SC2,
@@ -453,7 +453,7 @@ where
     #[instrument(name = "ivc_fold_step", skip_all, fields(step = self.step))]
     pub fn fold_step<const T: usize, RP1, RP2>(
         &mut self,
-        pp: &PublicParams<'_, A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
         secondary: &SC2,
     ) -> Result<(), Error>
@@ -677,7 +677,7 @@ where
     #[instrument(name = "ivc_verify", skip_all)]
     pub fn verify<const T: usize, RP1, RP2>(
         &mut self,
-        pp: &PublicParams<'_, A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
     ) -> Result<(), Error>
     where
         RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
