@@ -9,7 +9,7 @@
 //!
 //! Additionally, it defines a method is_sat on PlonkStructure to determine if
 //! a given Plonk instance and witness satisfy the circuit constraints.
-use std::{cell::OnceCell, iter, num::NonZeroUsize, time::Instant};
+use std::{cell::OnceCell, num::NonZeroUsize, time::Instant};
 
 use count_to_non_zero::*;
 use halo2_proofs::arithmetic::CurveAffine;
@@ -365,34 +365,40 @@ impl<F: PrimeField> PlonkStructure<F> {
     /// check whether the log-derivative equation is satisfied
     pub fn is_sat_log_derivative(&self, W: &[Vec<F>]) -> bool {
         let nrow = 1 << self.k;
-        let check_is_zero = |hs: &[Vec<F>], gs: &[Vec<F>]| -> bool {
-            hs.iter().zip(gs).all(|(h, g)| {
-                // check sum_i h_i = sum_i g_i for each lookup
-                h.iter()
-                    .zip_eq(g)
-                    .map(|(hi, gi)| *hi - *gi)
-                    .sum::<F>()
-                    .eq(&F::ZERO)
-            })
-        };
-        let gather_vectors = |W: &Vec<F>, start_index: usize| -> Vec<Vec<F>> {
-            iter::successors(Some(start_index), |idx| Some(idx + 2))
-                .take(self.num_lookups())
-                .map(|idx| W[idx * nrow..(idx * nrow + nrow)].to_vec())
-                .collect::<Vec<_>>()
+        // Select which witness column to use
+        let col = if self.has_vector_lookup() {
+            2
+        } else if self.num_lookups() > 0 {
+            1
+        } else {
+            return true;
         };
 
-        if self.has_vector_lookup() {
-            let hs = gather_vectors(&W[2], 0);
-            let gs = gather_vectors(&W[2], 1);
-            check_is_zero(&hs, &gs)
-        } else if self.num_lookups() > 0 {
-            let hs = gather_vectors(&W[1], 0);
-            let gs = gather_vectors(&W[1], 1);
-            check_is_zero(&hs, &gs)
-        } else {
-            true
+        let w = &W[col];
+        let num = self.num_lookups();
+        // For lookup i, we compare:
+        // h_i = w[(2*i+0)*nrow .. (2*i+1)*nrow]
+        // g_i = w[(2*i+1)*nrow .. (2*i+2)*nrow]
+        for i in 0..num {
+            let h_start = (2 * i) * nrow;
+            let g_start = (2 * i + 1) * nrow;
+            // Bound check
+            if g_start + nrow > w.len() {
+                return false;
+            }
+            let h = &w[h_start..h_start + nrow];
+            let g = &w[g_start..g_start + nrow];
+            // Check sum(h) == sum(g) without allocations:
+            // sum_j (h[j] - g[j]) == 0
+            let mut acc = F::ZERO;
+            for j in 0..nrow {
+                acc += h[j] - g[j];
+            }
+            if acc != F::ZERO {
+                return false;
+            }
         }
+        true
     }
 
     pub fn get_degree_for_folding(&self) -> usize {
@@ -711,7 +717,7 @@ pub(crate) fn get_evaluate_witness_fn<'link, F: PrimeField>(
         }
 
         let gate_index = index / total_row;
-        let row_index = index & total_row;
+        let row_index = index % total_row;
 
         evaluators[gate_index].evaluate(&eval_domain, row_index)
     }

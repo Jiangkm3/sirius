@@ -1,4 +1,4 @@
-use std::{iter, marker::PhantomData, num::NonZeroUsize};
+use std::{marker::PhantomData, num::NonZeroUsize};
 
 use count_to_non_zero::CountToNonZeroExt;
 use itertools::Itertools;
@@ -20,10 +20,7 @@ use crate::{
         halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
         plonk::Error as Halo2Error,
     },
-    ivc::{
-        sangria::instances_accumulator_computation,
-        Instances,
-    },
+    ivc::{sangria::instances_accumulator_computation, Instances},
     nifs::sangria::accumulator::RelaxedPlonkWitness,
     plonk::{
         self,
@@ -32,7 +29,7 @@ use crate::{
     },
     polynomial::{
         graph_evaluator::GraphEvaluator,
-        sparse::{self, SparseMatrix},
+        sparse::SparseMatrix,
     },
     poseidon::ROTrait,
     sps::{Error as SpsError, SpecialSoundnessVerifier},
@@ -182,9 +179,7 @@ where
         let commit_span = info_span!("commit").entered();
         let cross_term_commits: Vec<C> = cross_terms
             .iter()
-            .map(|v| {
-                ck.commit(v)
-            })
+            .map(|v| ck.commit(v))
             .collect::<Result<Vec<_>, _>>()?;
         commit_span.exit();
 
@@ -421,11 +416,7 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
     ) -> Result<(), VerifyError> {
         /// Under this collapsing scheme, `instance` columns other than consistency markers are not
-        /// foldeded, but accumulated using hash. Therefore, they need to be cut out for
-        /// `is_sat_permutation`.
-        ///
-        /// To account for these permutations in the `Relaxed` version, we add them to StepFoldingCircuit
-        /// as a copy constraint with private input (witness)
+        /// folded, but accumulated using hash. Therefore, they need to be cut out for `is_sat_permutation`.
         fn permutation_data_without_step_circuit_instances<F: PrimeField>(
             S: &PlonkStructure<F>,
         ) -> SparseMatrix<F> {
@@ -435,49 +426,62 @@ where
                 .matrix(S.k, &S.num_io, S.num_advice_columns)
         }
 
-        /// While checking permutations, we need to line up all instance columns one after the other, but
-        /// since we cut out all instance columns except the null column (consistency_marker) for the
-        /// `Relaxed*` version we need to augment them based on [`PlonkStructure::num_io`].
-        fn iter_flat_instances_with_padding<'b, C: CurveAffine, const MARKERS_LEN: usize>(
-            U: &'b RelaxedPlonkInstance<C, MARKERS_LEN>,
-            S: &'b PlonkStructure<C::ScalarExt>,
-        ) -> impl 'b + Iterator<Item = C::ScalarExt> {
-            U.consistency_markers.iter().copied().chain(
-                S.num_io
-                    .iter()
-                    .skip(1)
-                    // Use 0xfffffff only for easy debug
-                    .flat_map(|len| iter::repeat(C::ScalarExt::from_u128(0xfffffff)).take(*len)),
-            )
-        }
-
         let RelaxedPlonkTrace { U, W } = acc;
 
-        let Z = iter_flat_instances_with_padding(U, S)
-            .chain(
-                W.W[0]
-                    .iter()
-                    .take((1 << S.k) * S.num_advice_columns)
-                    .copied(),
-            )
-            .collect::<Vec<_>>();
+        let nrow = 1usize << S.k;
+        let inst_total_len: usize = S.num_io.iter().sum(); // flat instance width
+        let wit_len = nrow * S.num_advice_columns;
+        let z_len = inst_total_len + wit_len;
 
-        let mismatch_count =
-            sparse::matrix_multiply(&permutation_data_without_step_circuit_instances(S), &Z)
-                .into_iter()
-                .zip_eq(Z)
-                .enumerate()
-                .filter(|(row, (y, z))| {
-                    let diff = *y - *z;
+        // Virtual Z accessor:
+        // Z = [ consistency_markers | (other instance columns padded with 0) | witness prefix ]
+        let z_at = |idx: usize| -> C::ScalarExt {
+            if idx < MARKERS_LEN {
+                U.consistency_markers[idx]
+            } else if idx < inst_total_len {
+                C::ScalarExt::ZERO
+            } else {
+                let j = idx - inst_total_len;
+                // only the prefix is in Z; if j is out-of-range, treat as 0 (shouldn't happen)
+                W.W[0].get(j).copied().unwrap_or(C::ScalarExt::ZERO)
+            }
+        };
 
-                    if diff.is_zero().into() {
-                        false
-                    } else {
-                        warn!("permutation mismatch at {row} with: {y:?} - {z:?} = {diff:?}");
-                        true
-                    }
-                })
-                .count();
+        // Multiply sparse permutation matrix by virtual Z without materializing Z.
+        let P = permutation_data_without_step_circuit_instances(S);
+        let mut result = vec![C::ScalarExt::ZERO; z_len];
+
+        for (row, col, value) in P.iter() {
+            if *row >= z_len {
+                panic!(
+                    "invalid matrix multiply: row {} out of bounds {}",
+                    row, z_len
+                );
+            }
+            if *col >= z_len {
+                panic!(
+                    "invalid matrix multiply: col {} out of bounds {}",
+                    col, z_len
+                );
+            }
+            result[*row] += *value * z_at(*col);
+        }
+
+        let mismatch_count = result
+            .into_iter()
+            .enumerate()
+            .filter(|(row, y)| {
+                let z = z_at(*row);
+                let diff = *y - z;
+
+                if diff.is_zero().into() {
+                    false
+                } else {
+                    warn!("permutation mismatch at {row} with: {y:?} - {z:?} = {diff:?}");
+                    true
+                }
+            })
+            .count();
 
         if mismatch_count == 0 {
             Ok(())

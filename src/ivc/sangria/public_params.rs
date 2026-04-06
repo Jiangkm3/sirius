@@ -54,7 +54,7 @@ where
 {
     S: PlonkStructure<C::Scalar>,
     #[serde(skip_serializing)]
-    ck: CommitmentKey<C>,
+    ck: std::sync::Arc<CommitmentKey<C>>,
     params: StepParams<C::Scalar, RP::OnCircuit>,
 }
 
@@ -105,7 +105,7 @@ where
 {
     fn new(
         S: PlonkStructure<C::Scalar>,
-        commitment_key: CommitmentKey<C>,
+        commitment_key: std::sync::Arc<CommitmentKey<C>>,
         ro_constant: RP::Args,
         limb_width: NonZeroUsize,
         n_limbs: NonZeroUsize,
@@ -191,7 +191,7 @@ pub struct CircuitPublicParamsInput<
     SC: StepCircuit<A, C::Scalar>,
 > {
     step_circuit: &'circuit SC,
-    commitment_key: CommitmentKey<C>,
+    commitment_key: std::sync::Arc<CommitmentKey<C>>,
     k_table_size: u32,
     ro_constant: RPArgs,
 }
@@ -201,7 +201,7 @@ impl<'key, 'circuit, const A: usize, C: CurveAffine, RPArgs, SC: StepCircuit<A, 
 {
     pub fn new(
         k_table_size: u32,
-        commitment_key: CommitmentKey<C>,
+        commitment_key: std::sync::Arc<CommitmentKey<C>>,
         ro_constant: RPArgs,
         step_circuit: &'circuit SC,
     ) -> Self {
@@ -513,13 +513,13 @@ mod pp_test {
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
-                commitment_key: get_or_create_commitment_key(K + 3, "bn256").unwrap(),
+                commitment_key: std::sync::Arc::new(get_or_create_commitment_key(K + 3, "bn256").unwrap()),
                 ro_constant: spec1,
             },
             CircuitPublicParamsInput {
                 step_circuit: &trivial::Circuit::default(),
                 k_table_size: K as u32,
-                commitment_key: get_or_create_commitment_key(K + 3, "grumpkin").unwrap(),
+                commitment_key: std::sync::Arc::new(get_or_create_commitment_key(K + 3, "grumpkin").unwrap()),
                 ro_constant: spec2,
             },
             LIMB_WIDTH,

@@ -108,6 +108,8 @@ pub mod sangria_prelude {
     /// All imports and alias related to what will use bn256 & grumpkin as the first and second
     /// curve respectively
     pub mod bn256 {
+        use std::sync::Arc;
+
         pub use bn256::G1;
         pub use grumpkin::G1 as G2;
 
@@ -164,13 +166,13 @@ pub mod sangria_prelude {
             PublicParams::new(
                 crate::ivc::sangria::CircuitPublicParamsInput::new(
                     primary_k_table_size,
-                    primary_commitment_key,
+                    Arc::new(primary_commitment_key),
                     super::default_random_oracle_constant(),
                     sc1,
                 ),
                 crate::ivc::sangria::CircuitPublicParamsInput::new(
                     secondary_k_table_size,
-                    secondary_commitment_key,
+                    Arc::new(secondary_commitment_key),
                     super::default_random_oracle_constant(),
                     sc2,
                 ),
@@ -184,6 +186,8 @@ pub mod sangria_prelude {
     /// All imports and alias related to what will use grumpkin & bn256 as the first and second
     /// curve respectively
     pub mod grumpkin {
+        use std::sync::Arc;
+
         pub use bn256::G1 as G2;
         pub use grumpkin::G1;
 
@@ -240,13 +244,13 @@ pub mod sangria_prelude {
             PublicParams::new(
                 crate::ivc::sangria::CircuitPublicParamsInput::new(
                     primary_k_table_size,
-                    primary_commitment_key,
+                    Arc::new(primary_commitment_key),
                     super::default_random_oracle_constant(),
                     sc1,
                 ),
                 crate::ivc::sangria::CircuitPublicParamsInput::new(
                     secondary_k_table_size,
-                    secondary_commitment_key,
+                    Arc::new(secondary_commitment_key),
                     super::default_random_oracle_constant(),
                     sc2,
                 ),
