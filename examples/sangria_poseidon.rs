@@ -108,13 +108,13 @@ fn main() {
     >::new(
         sangria::CircuitPublicParamsInput::new(
             PRIMARY_CIRCUIT_TABLE_SIZE as u32,
-            primary_commitment_key,
+            primary_commitment_key.into(),
             primary_spec,
             &primary,
         ),
         sangria::CircuitPublicParamsInput::new(
             SECONDARY_CIRCUIT_TABLE_SIZE as u32,
-            secondary_commitment_key,
+            secondary_commitment_key.into(),
             secondary_spec,
             &secondary,
         ),

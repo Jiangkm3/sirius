@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{marker::PhantomData, num::NonZeroUsize};
 
 use count_to_non_zero::CountToNonZeroExt;
@@ -9,6 +10,9 @@ use tracing::*;
 pub use self::accumulator::{
     FoldablePlonkInstance, FoldablePlonkTrace, RelaxedPlonkInstance, RelaxedPlonkTrace,
 };
+pub use self::decider::{
+    GateDeciderProof, GateDeciderProverParam, GateDeciderVerifierParam, QueryLayout,
+};
 pub use crate::plonk::PlonkInstance;
 use crate::{
     commitment::{self, CommitmentKey},
@@ -17,7 +21,7 @@ use crate::{
     ff::Field,
     halo2_proofs::{
         arithmetic::CurveAffine,
-        halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
+        halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits, WithSmallOrderMulGroup},
         plonk::Error as Halo2Error,
     },
     ivc::{sangria::instances_accumulator_computation, Instances},
@@ -36,32 +40,20 @@ use crate::{
 };
 
 pub mod accumulator;
+pub mod decider;
+pub mod ipa;
 
-/// Represent intermediate polynomial terms that arise when folding
-/// two polynomial relations into one.
-///
-/// In the context of the NIFS protocol, when two identical
-/// polynomial relations are folded, certain terms (referred
-/// to as cross terms) emerge that capture the interaction between
-/// the two original polynomials.
+// =====================================================================
+// Cross-term types
+// =====================================================================
+
 pub type CrossTerms<C> = Vec<Box<[<C as CurveAffine>::ScalarExt]>>;
-
-/// Cryptographic commitments to the [`CrossTerms`].
 pub type CrossTermCommits<C> = Vec<C>;
 
-/// VanillaFS: Vanilla version of Non Interactive Folding Scheme
-///
-/// Given a polynomial relation `P(x_1,...,x_n)` with polynomial degree `d.
-/// After folding two such (identical) relations, we have:
-/// - `P(x_1 + r*y_1, ..., x_n + r * y_n) = P(x_1, ..., x_n) + \sum_{k=1}^{d-1} T_k + r^d * P(y_1,...,y_n)`
-/// - `cross_term = [T_1,...,T_{d-1}]`
-/// - `cross_term_commits = [Comm(T_1),...,Comm(T_{d-1})]`
-///
-/// Please refer to: [notes](https://hackmd.io/@chaosma/BJvWmnw_h#31-NIFS)
-///
-/// `MARKERS_LEN` - the first column of instance is folded separately, the length of this column is
-/// regulated by this parameter
-// TODO Replace links to either the documentation right here, or the official Snarkify resource
+// =====================================================================
+// VanillaFS struct and per-step folding API
+// =====================================================================
+
 #[derive(Clone, Debug)]
 pub struct VanillaFS<C: CurveAffine, const MARKERS_LEN: usize = CONSISTENCY_MARKERS_COUNT> {
     _marker: PhantomData<C>,
@@ -77,27 +69,7 @@ impl<C: CurveAffine, const MARKERS_LEN: usize> VanillaFS<C, MARKERS_LEN>
 where
     C::Base: PrimeFieldBits + FromUniformBytes<64>,
 {
-    /// Commits to the cross terms between two Plonk instance-witness pairs.
-    ///
-    /// This method calculates the cross terms and their commitments, which
-    /// are essential for the folding process.
-    ///
-    /// # Arguments
-    /// * `ck`: The commitment key.
-    /// * `S`: the Plonk structure shared by both instance-witness pairs.
-    /// * `U1`: The first relaxed Plonk instance.
-    /// * `W1`: The witness for the first relaxed Plonk instance.
-    /// * `U2`: The second Plonk instance.
-    /// * `W2`: The witness for the second Plonk instance.
-    ///
-    /// # Returns
-    /// A tuple containing the cross terms and their commitments.
-    ///
-    /// # Context
-    /// The cross terms are derived from the polynomial relations
-    /// of the two instance-witness pairs. They play a crucial role
-    /// in the folding process, allowing two polynomial relations
-    /// to be combined into one.
+    // commit_cross_terms
     #[instrument(skip_all)]
     pub fn commit_cross_terms(
         ck: &CommitmentKey<C>,
@@ -132,10 +104,8 @@ where
                 .map(|optional_expr| match optional_expr {
                     Some(expr) => {
                         let evaluator = GraphEvaluator::new(expr);
-
                         let n_chunks = rayon::current_num_threads();
                         let chunk_sz = (row_size + n_chunks - 1) / n_chunks;
-
                         let ranges: Vec<(usize, usize)> = (0..n_chunks)
                             .map(|i| {
                                 let start = i * chunk_sz;
@@ -145,27 +115,19 @@ where
                             .filter(|(s, e)| s < e)
                             .collect();
 
-                        // Evaluate each chunk in parallel, but rows within a chunk sequentially with reused scratch
                         let parts: Vec<Vec<_>> = ranges
                             .into_par_iter()
                             .map(|(start, end)| {
-                                let mut scratch = evaluator.instance(); // one scratch per chunk
+                                let mut scratch = evaluator.instance();
                                 let mut out = Vec::with_capacity(end - start);
-
                                 for row in start..end {
-                                    let v = evaluator.evaluate_with_scratch(
-                                        &data,
-                                        row,
-                                        &mut scratch,
-                                    )?;
+                                    let v = evaluator.evaluate_with_scratch(&data, row, &mut scratch)?;
                                     out.push(v);
                                 }
-
                                 Ok::<Vec<<C as CurveAffine>::ScalarExt>, EvalError>(out)
                             })
                             .collect::<Result<Vec<Vec<C::ScalarExt>>, EvalError>>()?;
 
-                        // Flatten back into row order and box it
                         let flat: Vec<_> = parts.into_iter().flatten().collect();
                         let boxed: Box<[_]> = flat.into_boxed_slice();
                         Ok::<Box<[<C as CurveAffine>::ScalarExt]>, EvalError>(boxed)
@@ -186,7 +148,7 @@ where
         Ok((cross_terms, cross_term_commits))
     }
 
-    /// Absorb all fields into RandomOracle `RO` & generate challenge based on that
+    // generate_challenge
     #[instrument(skip_all)]
     pub(crate) fn generate_challenge(
         pp_digest: &(C::Base, C::Base),
@@ -196,7 +158,6 @@ where
         cross_term_commits: &[C],
     ) -> Result<<C as CurveAffine>::ScalarExt, Error> {
         let _span = info_span!("sangria_cha").entered();
-
         Ok(ro_acc
             .absorb_field(pp_digest.0)
             .absorb_field(pp_digest.1)
@@ -207,6 +168,10 @@ where
             .squeeze::<C::ScalarExt>(NUM_CHALLENGE_BITS))
     }
 }
+
+// =====================================================================
+// Error types — extended with decider-specific variants
+// =====================================================================
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -234,6 +199,18 @@ impl<C: CurveAffine> From<(C::Base, C::Base)> for VerifierParam<C> {
     }
 }
 
+impl<C: CurveAffine> VerifierParam<C> {
+    /// Accessor used by the decider setup, which inherits pp_digest
+    /// from the per-step verifier param.
+    pub fn pp_digest(&self) -> (C::Base, C::Base) {
+        self.pp_digest
+    }
+}
+
+// =====================================================================
+// Per-step setup / prove / verify
+// =====================================================================
+
 impl<C: CurveAffine, const MARKERS_LEN: usize> VanillaFS<C, MARKERS_LEN>
 where
     C::Base: PrimeFieldBits + FromUniformBytes<64>,
@@ -246,7 +223,6 @@ where
             let c = pp_digest.coordinates().unwrap();
             (*c.x(), *c.y())
         };
-
         Ok((ProverParam { S, pp_digest }, VerifierParam { pp_digest }))
     }
 
@@ -263,21 +239,6 @@ where
             .ok_or(Error::NoConsistencyMarkers)
     }
 
-    /// Generates a proof of correct folding using the NIFS protocol.
-    ///
-    /// This method takes two relaxed Plonk instance-witness pairs and calculates the folded instance and witness.
-    /// It also computes the cross terms and their commitments.
-    ///
-    /// # Arguments
-    /// * `ck`: The commitment key.
-    /// * `pp`: The prover parameter.
-    /// * `ro_acc`: The random oracle for the accumulation scheme. Used to securely combine
-    ///             multiple verification steps or proofs into a single, updated accumulator.
-    /// * `accumulator`: The instance-witness pair for accumulator
-    /// * `incoming`: The instance-witness pair from synthesize of circuit
-    ///
-    /// # Returns
-    /// A tuple containing folded accumulator and proof for the folding scheme verifier
     #[instrument(skip_all)]
     pub fn prove(
         ck: &CommitmentKey<C>,
@@ -287,7 +248,6 @@ where
         incoming: &[FoldablePlonkTrace<C, MARKERS_LEN>; 1],
     ) -> Result<(RelaxedPlonkTrace<C, MARKERS_LEN>, CrossTermCommits<C>), Error> {
         let incoming = &incoming[0];
-
         let U1 = &accumulator.U;
         let W1 = &accumulator.W;
         let U2 = &incoming.u;
@@ -305,23 +265,6 @@ where
         Ok((RelaxedPlonkTrace { U, W }, cross_term_commits))
     }
 
-    /// Verifies the correctness of the folding using the NIFS protocol.
-    ///
-    /// This method takes a relaxed Plonk instance and a Plonk instance and verifies if they have been correctly folded.
-    ///
-    /// # Arguments
-    /// * `vp`: verifier parameter
-    /// * `ro_acc`: The random oracle for the accumulation scheme. Used to securely combine
-    ///             multiple verification steps or proofs into a single, updated accumulator.
-    /// * `ro_nark`: The random oracle used within the non-interactive argument of knowledge (NARK)
-    ///              system. Facilitates the Fiat-Shamir transformation, converting interactive
-    ///              proofs to non-interactive by deterministically generating challenges based
-    ///              on the protocol's messages.
-    /// * `U1`: The relaxed Plonk instance.
-    /// * `U2`: The Plonk instance.
-    ///
-    /// # Returns
-    /// The folded relaxed Plonk instance.
     pub fn verify(
         vp: &VerifierParam<C>,
         ro_nark: &mut impl ROTrait<C::Base>,
@@ -331,14 +274,15 @@ where
         cross_term_commits: &CrossTermCommits<C>,
     ) -> Result<RelaxedPlonkInstance<C>, Error> {
         let U2 = &U2[0];
-
         U2.sps_verify(ro_nark)?;
-
         let r = VanillaFS::generate_challenge(&vp.pp_digest, ro_acc, U1, U2, cross_term_commits)?;
-
         Ok(U1.fold(U2, cross_term_commits, &r))
     }
 }
+
+// =====================================================================
+// VerifyError — extended with decider-specific variants
+// =====================================================================
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -354,7 +298,20 @@ pub enum VerifyError {
     PermCheckFail { mismatch_count: usize },
     #[error("Instance mismatch")]
     InstanceMismatch,
+    #[error("Proof shape mismatch")]
+    ProofShapeMismatch,
+    #[error("Gate identity mismatch")]
+    GateIdentityMismatch,
+    #[error("Opening failed: {error}")]
+    OpeningFailed { error: String },
 }
+
+// =====================================================================
+// is_sat_* family — kept for debugging/tests
+//
+// is_sat_pub_instances refactored to delegate to an instance-only variant
+// that the decider verifier can call directly.
+// =====================================================================
 
 impl<C: CurveAffine, const MARKERS_LEN: usize> VanillaFS<C, MARKERS_LEN>
 where
@@ -365,7 +322,6 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
     ) -> Result<(), VerifyError> {
         let RelaxedPlonkTrace { U, W } = acc;
-
         let total_row = 1 << S.k;
         let data = PlonkEvalDomain {
             num_advice: S.num_advice_columns,
@@ -383,7 +339,6 @@ where
             .map(|row| {
                 evaluator.evaluate(&data, row).map(|eval_of_row| {
                     let expected = W.E[row];
-
                     if eval_of_row.eq(&expected) {
                         0
                     } else {
@@ -392,10 +347,7 @@ where
                     }
                 })
             })
-            .try_reduce(
-                || 0,
-                |mismatch_count, is_missed| Ok(mismatch_count + is_missed),
-            )
+            .try_reduce(|| 0, |mismatch_count, is_missed| Ok(mismatch_count + is_missed))
             .map(|mismatch_count| {
                 Some(plonk::Error::EvaluationMismatch {
                     mismatch_count: NonZeroUsize::new(mismatch_count)?,
@@ -407,7 +359,6 @@ where
         if !S.is_sat_log_derivative(&W.W) {
             return Err(plonk::Error::LogDerivativeNotSat.into());
         }
-
         Ok(())
     }
 
@@ -415,8 +366,6 @@ where
         S: &PlonkStructure<C::ScalarExt>,
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
     ) -> Result<(), VerifyError> {
-        /// Under this collapsing scheme, `instance` columns other than consistency markers are not
-        /// folded, but accumulated using hash. Therefore, they need to be cut out for `is_sat_permutation`.
         fn permutation_data_without_step_circuit_instances<F: PrimeField>(
             S: &PlonkStructure<F>,
         ) -> SparseMatrix<F> {
@@ -427,14 +376,11 @@ where
         }
 
         let RelaxedPlonkTrace { U, W } = acc;
-
         let nrow = 1usize << S.k;
-        let inst_total_len: usize = S.num_io.iter().sum(); // flat instance width
+        let inst_total_len: usize = S.num_io.iter().sum();
         let wit_len = nrow * S.num_advice_columns;
         let z_len = inst_total_len + wit_len;
 
-        // Virtual Z accessor:
-        // Z = [ consistency_markers | (other instance columns padded with 0) | witness prefix ]
         let z_at = |idx: usize| -> C::ScalarExt {
             if idx < MARKERS_LEN {
                 U.consistency_markers[idx]
@@ -442,27 +388,19 @@ where
                 C::ScalarExt::ZERO
             } else {
                 let j = idx - inst_total_len;
-                // only the prefix is in Z; if j is out-of-range, treat as 0 (shouldn't happen)
                 W.W[0].get(j).copied().unwrap_or(C::ScalarExt::ZERO)
             }
         };
 
-        // Multiply sparse permutation matrix by virtual Z without materializing Z.
         let P = permutation_data_without_step_circuit_instances(S);
         let mut result = vec![C::ScalarExt::ZERO; z_len];
 
         for (row, col, value) in P.iter() {
             if *row >= z_len {
-                panic!(
-                    "invalid matrix multiply: row {} out of bounds {}",
-                    row, z_len
-                );
+                panic!("invalid matrix multiply: row {} out of bounds {}", row, z_len);
             }
             if *col >= z_len {
-                panic!(
-                    "invalid matrix multiply: col {} out of bounds {}",
-                    col, z_len
-                );
+                panic!("invalid matrix multiply: col {} out of bounds {}", col, z_len);
             }
             result[*row] += *value * z_at(*col);
         }
@@ -473,7 +411,6 @@ where
             .filter(|(row, y)| {
                 let z = z_at(*row);
                 let diff = *y - z;
-
                 if diff.is_zero().into() {
                     false
                 } else {
@@ -495,7 +432,6 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
     ) -> Result<(), VerifyError> {
         let RelaxedPlonkTrace { U, W } = acc;
-
         U.W_commitments
             .iter()
             .zip_eq(W.W.iter())
@@ -507,20 +443,26 @@ where
         if ck.commit(&W.E).unwrap().ne(&U.E_commitment) {
             return Err(VerifyError::ECommitmentMismatch);
         }
-
         Ok(())
     }
 
-    pub fn is_sat_pub_instances(
-        acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
-        pub_instances: &[Vec<Vec<<C as CurveAffine>::ScalarExt>>],
+    /// Public-instance check that takes a `RelaxedPlonkInstance` directly,
+    /// for use by the decider verifier (which doesn't have the witness).
+    ///
+    /// `is_sat_pub_instances` (which takes the full trace) is preserved as
+    /// a thin wrapper for backwards compatibility and test usage.
+    pub fn is_sat_pub_instances_with_instance(
+        U: &RelaxedPlonkInstance<C, MARKERS_LEN>,
+        pub_instances: &[Vec<Vec<C::ScalarExt>>],
     ) -> Result<(), VerifyError> {
-        match acc.U.step_circuit_instances_hash_accumulator {
+        match U.step_circuit_instances_hash_accumulator {
             accumulator::SCInstancesHashAcc::None => {
-                assert!(pub_instances.iter().all(|instances| instances.get_step_circuit_instances().is_empty()));
+                assert!(pub_instances
+                    .iter()
+                    .all(|instances| instances.get_step_circuit_instances().is_empty()));
                 Ok(())
             }
-            accumulator::SCInstancesHashAcc::Hash(step_circuit_instances_hash_accumulator) => {
+            accumulator::SCInstancesHashAcc::Hash(stored_hash) => {
                 pub_instances
                     .iter()
                     .fold(
@@ -532,18 +474,22 @@ where
                             )
                         },
                     )
-                    .ne(&step_circuit_instances_hash_accumulator)
+                    .ne(&stored_hash)
                     .then_some(VerifyError::InstanceMismatch)
                     .err_or(())
             }
         }
     }
 
-    /// Comprehensive satisfaction check for an accumulator.
-    ///
-    /// This method runs multiple checks ([`IsSatAccumulation::is_sat_accumulation`],
-    /// [`IsSatAccumulation::is_sat_permutation`], [`IsSatAccumulation::is_sat_witness_commit`]) to
-    /// ensure that all required constraints are satisfied in the accumulator.
+    /// Backwards-compatible wrapper: takes a trace, delegates to the
+    /// instance-only variant.
+    pub fn is_sat_pub_instances(
+        acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
+        pub_instances: &[Vec<Vec<C::ScalarExt>>],
+    ) -> Result<(), VerifyError> {
+        Self::is_sat_pub_instances_with_instance(&acc.U, pub_instances)
+    }
+
     pub fn is_sat(
         ck: &CommitmentKey<C>,
         S: &PlonkStructure<C::ScalarExt>,
@@ -551,43 +497,102 @@ where
         pub_instances: &[Vec<Vec<C::ScalarExt>>],
     ) -> Result<(), Vec<VerifyError>> {
         let mut errors = vec![];
-
-        if let Err(err) = Self::is_sat_accumulation(S, acc) {
-            errors.push(err);
-        }
-
-        if let Err(err) = Self::is_sat_permutation(S, acc) {
-            errors.push(err);
-        }
-
-        if let Err(err) = Self::is_sat_witness_commit(ck, acc) {
-            errors.push(err);
-        }
-
-        if let Err(err) = Self::is_sat_pub_instances(acc, pub_instances) {
-            errors.push(err);
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        if let Err(err) = Self::is_sat_accumulation(S, acc) { errors.push(err); }
+        if let Err(err) = Self::is_sat_permutation(S, acc)  { errors.push(err); }
+        if let Err(err) = Self::is_sat_witness_commit(ck, acc) { errors.push(err); }
+        if let Err(err) = Self::is_sat_pub_instances(acc, pub_instances) { errors.push(err); }
+        if errors.is_empty() { Ok(()) } else { Err(errors) }
     }
 }
 
-/// Number of consistency markers in instance column
-/// This number is relevant for sangria IVC
+// =====================================================================
+// Decider entry points
+//
+// These are the production verification path.  The folding scheme
+// produces RelaxedPlonkTraces at every step; once IVC finishes, the
+// final accumulator is "decided" — a succinct proof is produced that
+// it satisfies the relaxed Plonk relation, and the public instances
+// are checked against the hash accumulator.
+//
+// is_sat remains as a debug-time cross-check.
+// =====================================================================
+
+impl<C: CurveAffine, const MARKERS_LEN: usize> VanillaFS<C, MARKERS_LEN>
+where
+    C::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C::ScalarExt: PrimeFieldBits + FromUniformBytes<64> + WithSmallOrderMulGroup<3>,
+{
+    /// Set up the decider's preprocessed parameters.
+    ///
+    /// Computes commitments to the circuit's fixed and selector columns
+    /// (one-time per circuit), constructs IPA setup from the existing
+    /// commitment key, and packages everything into prover and verifier
+    /// params for the decider.
+    ///
+    /// Takes the existing per-step `ProverParam` and `VerifierParam` to
+    /// inherit `S` and `pp_digest`, avoiding duplication.
+    pub fn setup_decider_params(
+        pp: &ProverParam<C>,
+        ck: &Arc<CommitmentKey<C>>,
+        layout: QueryLayout,
+    ) -> Result<(GateDeciderProverParam<C>, GateDeciderVerifierParam<C>), Error> {
+        // Reconstruct a curve point for setup_decider_params to consume.
+        // (The decider's setup function takes a curve point, then extracts
+        // coordinates — same shape as the existing setup_params.)
+        //
+        // Since pp.pp_digest is already (x, y) coordinates, we just hand
+        // them through directly in the decider params.
+        decider::setup_decider_params_from_digest(pp.pp_digest, pp.S.clone(), ck, layout)
+    }
+
+    /// Produce a decider proof on the final accumulator.
+    ///
+    /// Currently runs only the gate-identity portion.  When the
+    /// permutation argument is added, this function will compose the
+    /// gate proof and the permutation proof into a unified proof object.
+    #[instrument(skip_all)]
+    pub fn prove_decider(
+        decider_pp: &GateDeciderProverParam<C>,
+        layout: &QueryLayout,
+        final_acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
+        transcript: &mut impl ROTrait<C::Base>,
+    ) -> Result<GateDeciderProof<C>, Error> {
+        Self::prove_decider_gate_part(decider_pp, layout, final_acc, transcript)
+    }
+
+    /// Verify a decider proof against the final accumulator's instance
+    /// and the user's claimed public instances.
+    ///
+    /// Combines:
+    ///   1. The gate-identity check (verify_decider_gate_part)
+    ///   2. The public-instance hash check (is_sat_pub_instances_with_instance)
+    ///
+    /// When the permutation argument is added, this function will also
+    /// invoke verify_decider_permutation_part.
+    ///
+    /// Note: this is the *full* verification path replacing `is_sat`.
+    /// The verifier does not need the witness — only the instance, the
+    /// proof, and the claimed public instances.
+    pub fn verify_decider(
+        decider_vp: &GateDeciderVerifierParam<C>,
+        U_final: &RelaxedPlonkInstance<C, MARKERS_LEN>,
+        pub_instances: &[Vec<Vec<C::ScalarExt>>],
+        proof: &GateDeciderProof<C>,
+        transcript: &mut impl ROTrait<C::Base>,
+    ) -> Result<(), VerifyError> {
+        Self::verify_decider_gate_part(decider_vp, U_final, proof, transcript)?;
+        Self::is_sat_pub_instances_with_instance(U_final, pub_instances)?;
+        // TODO: when added, call verify_decider_permutation_part here.
+        Ok(())
+    }
+}
+
+// =====================================================================
+// Consistency markers + step-circuit-instance helpers
+// =====================================================================
+
 pub const CONSISTENCY_MARKERS_COUNT: usize = 2;
 
-/// As part of the vanilla folding scheme, we use the values in the zero instance of the column for
-/// consistency between folding steps
-///
-/// - X0 is
-///     initializing value
-///     or
-///     hash of the state at the end of previous folding step
-/// - X1 is a hash of the state at the end of the current folding step
 pub trait GetConsistencyMarkers<const MARKERS: usize, F> {
     fn get_consistency_markers(&self) -> [F; MARKERS];
 }

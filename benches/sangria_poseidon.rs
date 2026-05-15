@@ -135,13 +135,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     >::new(
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE1 as u32,
-            primary_commitment_key,
+            primary_commitment_key.into(),
             primary_spec,
             &sc1,
         ),
         CircuitPublicParamsInput::new(
             CIRCUIT_TABLE_SIZE2 as u32,
-            secondary_commitment_key,
+            secondary_commitment_key.into(),
             secondary_spec,
             &sc2,
         ),

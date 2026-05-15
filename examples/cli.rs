@@ -348,13 +348,13 @@ fn fold<
             >::new(
                 sangria::CircuitPublicParamsInput::new(
                     sangria_args.primary_circuit_k_table_size,
-                    primary_commitment_key,
+                    primary_commitment_key.into(),
                     primary_spec,
                     &primary,
                 ),
                 sangria::CircuitPublicParamsInput::new(
                     sangria_args.secondary_circuit_k_table_size,
-                    secondary_commitment_key,
+                    secondary_commitment_key.into(),
                     secondary_spec,
                     &secondary,
                 ),

@@ -1,4 +1,4 @@
-use std::{fmt, io, iter, marker::PhantomData, num::NonZeroUsize, ops::Deref};
+use std::{fmt, io, iter, marker::PhantomData, num::NonZeroUsize, ops::Deref, sync::Arc};
 
 use halo2_proofs::plonk;
 use serde::Serialize;
@@ -69,6 +69,9 @@ where
         self.S.k as u32
     }
     pub fn ck(&self) -> &CommitmentKey<C> {
+        &self.ck
+    }
+    pub fn arc_ck(&self) -> &Arc<CommitmentKey<C>> {
         &self.ck
     }
     pub fn params(&self) -> &StepParams<C::Scalar, RP::OnCircuit> {

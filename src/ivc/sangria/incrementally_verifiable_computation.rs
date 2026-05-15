@@ -1,6 +1,6 @@
 use std::{io, marker::PhantomData, num::NonZeroUsize};
 
-use halo2_proofs::dev::MockProver;
+use halo2_proofs::{dev::MockProver, halo2curves::ff::WithSmallOrderMulGroup};
 use nifs::sangria::CONSISTENCY_MARKERS_COUNT;
 use serde::Serialize;
 use tracing::*;
@@ -21,11 +21,10 @@ use crate::{
     nifs::{
         self,
         sangria::{
-            accumulator::{FoldablePlonkTrace, RelaxedPlonkTrace},
-            FoldablePlonkInstance, GetConsistencyMarkers, VanillaFS, VerifyError,
+            FoldablePlonkInstance, GateDeciderProof, GateDeciderProverParam, GateDeciderVerifierParam, GetConsistencyMarkers, QueryLayout, VanillaFS, VerifyError, accumulator::{FoldablePlonkTrace, RelaxedPlonkTrace}
         },
     },
-    poseidon::{random_oracle::ROTrait, ROPair},
+    poseidon::{ROPair, random_oracle::ROTrait},
     sps,
     table::CircuitRunner,
     util::ScalarToBase,
@@ -54,7 +53,11 @@ impl<'a> SectionTimer<'a> {
 impl Drop for SectionTimer<'_> {
     fn drop(&mut self) {
         // pick your preferred level
-        println!("{}, Elapse = {} ms", self.name, self.start.elapsed().as_millis());
+        println!(
+            "{}, Elapse = {} ms",
+            self.name,
+            self.start.elapsed().as_millis()
+        );
     }
 }
 
@@ -147,17 +150,22 @@ where
     C1::Scalar: PrimeFieldBits + FromUniformBytes<64>,
     C2::Scalar: PrimeFieldBits + FromUniformBytes<64>,
 {
+    // existing fields ...
     primary: StepCircuitContext<A1, C1, SC1>,
     secondary: StepCircuitContext<A2, C2, SC2>,
-
     step: usize,
     secondary_nifs_pp: nifs::sangria::ProverParam<C2>,
     primary_nifs_pp: nifs::sangria::ProverParam<C1>,
     secondary_trace: [FoldablePlonkTrace<C2, { CONSISTENCY_MARKERS_COUNT }>; 1],
-
     debug_mode: bool,
+
+    // decider preprocessing
+    primary_layout: QueryLayout,
+    primary_decider_pp: GateDeciderProverParam<C1>,
+    primary_decider_vp: GateDeciderVerifierParam<C1>,
 }
 
+// Folding
 impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
 where
     C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
@@ -234,21 +242,23 @@ where
     where
         RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
         RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        C1::ScalarExt: WithSmallOrderMulGroup<3>,
+        C2::ScalarExt: WithSmallOrderMulGroup<3>,
     {
         let primary_span = info_span!("primary").entered();
-        // For use as first version of `U` in primary circuit synthesize
-        let secondary_pre_round_plonk_trace = pp.secondary_initial_plonk_trace();
 
+        // ---------------------------------------------------------------
+        // Primary pre-round setup
+        // ---------------------------------------------------------------
+        let secondary_pre_round_plonk_trace = pp.secondary_initial_plonk_trace();
         let primary_z_output = primary.process_step(&primary_z_0, pp.primary.k_table_size())?;
         debug!("primary z output calculated off-circuit");
 
-        // Will be used as input & output `U` of zero-step of IVC
         let secondary_relaxed_trace = RelaxedPlonkTrace::from_regular(
             secondary_pre_round_plonk_trace.clone(),
             pp.secondary.k_table_size() as usize,
         );
 
-        // Prepare primary constraint system for folding
         let primary_consistency_marker = {
             let _s = info_span!("generate_instance").entered();
             [
@@ -339,10 +349,12 @@ where
         primary_span.exit();
         let _secondary_span = info_span!("secondary").entered();
 
+        // ---------------------------------------------------------------
+        // Secondary pre-round setup
+        // ---------------------------------------------------------------
         let secondary_z_output =
             secondary.process_step(&secondary_z_0, pp.secondary.k_table_size())?;
 
-        // Will be used as input & output `U` of zero-step of IVC
         let secondary_consistency_marker = {
             let _s = info_span!("generate_instance");
             [
@@ -427,6 +439,33 @@ where
                 &mut RP1::OffCircuit::new(pp.primary.params().ro_constant().clone()),
             )?;
 
+        // ---------------------------------------------------------------
+        // Decider preprocessing
+        //
+        // The decider params depend only on the circuit (S + ck + layout),
+        // not on the step or any witness data.  Compute once here so the
+        // decider is ready to use at end-of-IVC without recomputing.
+        // ---------------------------------------------------------------
+        let _decider_setup_span = info_span!("decider_setup").entered();
+
+        let primary_layout = QueryLayout {
+            num_selectors: pp.primary.S().selectors.len(),
+            num_fixed: pp.primary.S().fixed_columns.len(),
+            num_advice: pp.primary.S().num_advice_columns,
+        };
+
+        let (primary_decider_pp, primary_decider_vp) =
+            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::setup_decider_params(
+                &primary_nifs_pp,
+                pp.primary.arc_ck(),
+                primary_layout.clone(),
+            )?;
+
+        debug!("decider params constructed for both sides");
+
+        // ---------------------------------------------------------------
+        // Build Self with decider params included
+        // ---------------------------------------------------------------
         Ok(Self {
             step: 1,
             debug_mode,
@@ -447,6 +486,11 @@ where
                 pub_instances: vec![],
                 _p: PhantomData,
             },
+
+            // decider fields
+            primary_layout,
+            primary_decider_pp,
+            primary_decider_vp,
         })
     }
 
@@ -586,7 +630,8 @@ where
         debug!("start fold step with folding 'primary' by 'secondary'");
 
         // --- secondary.process_step ---
-        let next_secondary_z_i = secondary.process_step(&self.secondary.z_i, pp.secondary.k_table_size())?;
+        let next_secondary_z_i =
+            secondary.process_step(&self.secondary.z_i, pp.secondary.k_table_size())?;
 
         // --- consistency marker generation (secondary) ---
         let secondary_consistency_marker = [
@@ -811,4 +856,124 @@ fn get_consistency_marker_output<C: CurveAffine>(ins: &FoldablePlonkInstance<C>)
         &GetConsistencyMarkers::<CONSISTENCY_MARKERS_COUNT, _>::get_consistency_markers(ins)[1],
     )
     .unwrap()
+}
+
+// Decider
+impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
+where
+    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
+    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
+    C1::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    C2::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    SC1: StepCircuit<A1, C1::Scalar>,
+    SC2: StepCircuit<A2, C2::Scalar>,
+    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+{
+    /// Produce decider proofs for the final accumulators on both sides.
+    ///
+    /// Called once at the end of the IVC, after the last `fold_step`.
+    /// The returned proofs (plus the accumulator instances and public
+    /// instances) are what an external verifier needs to validate
+    /// the entire IVC run.
+    ///
+    /// This consumes nothing from `self`; it just reads the final
+    /// accumulators and the preprocessed decider params.
+    #[instrument(name = "ivc_prove_decider", skip_all)]
+    pub fn prove_decider<const T: usize, RP1, RP2>(
+        &self,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<GateDeciderProof<C1>, Error>
+    where
+        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+    {
+        let _primary_span = info_span!("primary").entered();
+
+        let mut primary_transcript =
+            RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
+
+        let primary_proof = VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+            &self.primary_decider_pp,
+            &self.primary_layout,
+            &self.primary.relaxed_trace,
+            &mut primary_transcript,
+        )?;
+
+        drop(_primary_span);
+
+        Ok(primary_proof)
+    }
+
+    /// Produce decider proofs for both sides and immediately verify them
+    /// in-process.
+    ///
+    /// This is a development-time check: it exercises the full prove +
+    /// verify path of the gate decider, but doesn't yet validate the
+    /// IVC's external invariants (consistency markers, dangling SPS).
+    ///
+    /// Roundtrip flow:
+    ///   1. Prove the gate identity on the primary accumulator.
+    ///   2. Verify it against the same accumulator's instance.
+    ///   3. Same on the secondary side.
+    ///
+    /// On success, returns the two proofs (so callers can serialize
+    /// them or hand them to a future external verifier).
+    ///
+    /// Note: until the upstream commitment-basis refactor lands, this
+    /// is expected to fail at the IPA verification step on honest
+    /// inputs.  See the basis-issue note in the decider module.
+    #[instrument(name = "ivc_check_gate_decider", skip_all)]
+    pub fn check_gate_decider<const T: usize, RP1, RP2>(
+        &self,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<GateDeciderProof<C1>, Error>
+    where
+        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+    {
+        // ----------------------------------------------------------------
+        // Primary side: prove then verify.
+        //
+        // Both transcripts must be initialized identically to produce
+        // matching Fiat–Shamir challenges.  We construct two separate
+        // RO instances (with the same constants) so each phase starts
+        // from a fresh state.
+        // ----------------------------------------------------------------
+        let _primary_span = info_span!("primary").entered();
+
+        let primary_proof = {
+            let mut prover_transcript =
+                RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
+            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+                &self.primary_decider_pp,
+                &self.primary_layout,
+                &self.primary.relaxed_trace,
+                &mut prover_transcript,
+            )?
+        };
+        debug!("primary decider proof produced");
+
+        {
+            let mut verifier_transcript =
+                RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
+            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::verify_decider(
+                &self.primary_decider_vp,
+                &self.primary.relaxed_trace.U,
+                &self.primary.pub_instances,
+                &primary_proof,
+                &mut verifier_transcript,
+            )
+            .map_err(|e| Error::VerifyFailed(vec![VerificationError::NotSat {
+                err: e,
+                is_primary: true,
+                is_relaxed: true,
+            }]))?;
+        }
+        debug!("primary decider proof verified");
+
+        drop(_primary_span);
+
+        Ok(primary_proof)
+    }
 }

@@ -114,6 +114,10 @@ impl<F: PrimeField> CompressedGates<F> {
         &self.homogeneous
     }
 
+    pub fn homogeneous_degree(&self) -> usize {
+        self.homogeneous.degree
+    }
+
     pub fn grouped(&self) -> &GroupedPoly<F> {
         self.grouped
             .get_or_init(|| GroupedPoly::new(self.homogeneous(), &self.index))

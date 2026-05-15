@@ -9,8 +9,7 @@ use std::{
 
 use digest::{ExtendableOutput, Update};
 use halo2_proofs::{
-    arithmetic::{best_multiexp, CurveAffine, CurveExt},
-    plonk::ConstraintSystem,
+    arithmetic::{CurveAffine, CurveExt, best_multiexp}, plonk::ConstraintSystem
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
