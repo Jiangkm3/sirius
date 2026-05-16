@@ -4,6 +4,7 @@ use crate::ff::{Field, FromUniformBytes, PrimeField};
 use crate::group::Curve;
 use crate::nifs::sangria::VerifyError;
 use halo2_proofs::arithmetic::{best_multiexp, CurveAffine, CurveExt};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 use crate::{commitment::CommitmentKey, constants::NUM_CHALLENGE_BITS, poseidon::ROTrait};
 
@@ -124,20 +125,25 @@ where
         //   b' = b_L + u · b_R
         //   G' = G_L + u · G_R
         let new_a: Vec<C::ScalarExt> = a_L
-            .iter()
-            .zip(a_R.iter())
-            .map(|(l, r)| *l * u + u_inv * r) // was: *l + u_inv * r
+            .par_iter()
+            .zip(a_R.par_iter())
+            .map(|(l, r)| *l * u + u_inv * r)
             .collect();
         let new_b: Vec<C::ScalarExt> = b_L
-            .iter()
-            .zip(b_R.iter())
-            .map(|(l, r)| *l * u_inv + u * r) // was: *l + u * r
+            .par_iter()
+            .zip(b_R.par_iter())
+            .map(|(l, r)| *l * u_inv + u * r)
             .collect();
-        let new_g: Vec<C> = g_L
-            .iter()
-            .zip(g_R.iter())
-            .map(|(l, r)| (l.to_curve() * u_inv + r.to_curve() * u).to_affine()) // was: l.to_curve() + r.to_curve() * u
+        // Compute new g in projective form, in parallel.
+        let new_g_curve: Vec<C::CurveExt> = g_L
+            .par_iter()
+            .zip(g_R.par_iter())
+            .map(|(l, r)| double_scalar_mul(u_inv, &l.to_curve(), u, &r.to_curve()))
             .collect();
+
+        // Batch convert to affine.
+        let mut new_g = vec![C::identity(); new_g_curve.len()];
+        C::CurveExt::batch_normalize(&new_g_curve, &mut new_g);
 
         a = new_a;
         b = new_b;
@@ -287,7 +293,7 @@ fn powers_of<F: PrimeField>(x: F, n: usize) -> Vec<F> {
 }
 
 fn inner_product<F: PrimeField>(a: &[F], b: &[F]) -> F {
-    a.iter().zip(b.iter()).map(|(a, b)| *a * b).sum()
+    a.par_iter().zip(b.par_iter()).map(|(a, b)| *a * b).sum()
 }
 
 /// Compute <coeffs, generators> + extra · U  via best_multiexp.
@@ -315,6 +321,76 @@ fn compute_b_after_rounds<F: Field>(b: &[F], challenges: &[F]) -> F {
     }
     debug_assert_eq!(b.len(), 1);
     b[0]
+}
+
+/// Compute `a * P + b * Q` using simultaneous scalar multiplication
+/// with 2-bit windowing.
+///
+/// Expected cost: ~256 doublings + ~64 additions (vs ~512 doublings + ~256 additions
+/// for two separate scalar muls).
+pub fn double_scalar_mul<C: CurveExt>(
+    a: C::ScalarExt,
+    p: &C,
+    b: C::ScalarExt,
+    q: &C,
+) -> C
+where
+    C::ScalarExt: PrimeField,
+{
+    // Precompute lookup table for window size 2.
+    // Index = (high_bit_a, low_bit_a, high_bit_b, low_bit_b) → 4 bits → 16 entries.
+    let p2 = p.double();
+    let q2 = q.double();
+
+    let table: [C; 16] = [
+        C::identity(),                  // 0000
+        *p,                             // 0001 -> a=01, b=00 -> 1·P
+        p2,                             // 0010 -> a=10, b=00 -> 2·P
+        p2 + p,                         // 0011 -> a=11, b=00 -> 3·P
+        *q,                             // 0100 -> a=00, b=01 -> 1·Q
+        *p + *q,                        // 0101
+        p2 + *q,                        // 0110
+        p2 + *p + *q,                   // 0111
+        q2,                             // 1000 -> a=00, b=10 -> 2·Q
+        *p + q2,                        // 1001
+        p2 + q2,                        // 1010
+        p2 + *p + q2,                   // 1011
+        q2 + *q,                        // 1100 -> a=00, b=11 -> 3·Q
+        *p + q2 + *q,                   // 1101
+        p2 + q2 + *q,                   // 1110
+        p2 + *p + q2 + *q,              // 1111
+    ];
+
+    // Get scalar bytes.
+    let a_repr = a.to_repr();
+    let b_repr = b.to_repr();
+    let a_bytes: &[u8] = a_repr.as_ref();
+    let b_bytes: &[u8] = b_repr.as_ref();
+
+    let mut result = C::identity();
+
+    // Iterate MSB to LSB, 2 bits at a time.
+    // Field is 256 bits = 32 bytes = 128 windows of 2 bits.
+    for byte_idx in (0..a_bytes.len()).rev() {
+        let a_byte = a_bytes[byte_idx];
+        let b_byte = b_bytes[byte_idx];
+
+        // Process 4 windows per byte (each window is 2 bits).
+        for window in (0..4).rev() {
+            // Double twice (2 bits per window).
+            result = result.double().double();
+
+            let a_window = (a_byte >> (window * 2)) & 0b11;
+            let b_window = (b_byte >> (window * 2)) & 0b11;
+            let idx = ((b_window << 2) | a_window) as usize;
+
+            if idx != 0 {
+                result += table[idx];
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
