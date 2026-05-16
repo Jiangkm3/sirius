@@ -280,8 +280,6 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<GateDeciderProof<C>, Error> {
-        println!("Prover CK_LEN: {}", pp.ipa_params.ck.len());
-
         let RelaxedPlonkTrace { U, W } = acc;
         let n = 1usize << pp.S.k;
         let gate_expr = pp.S.custom_gates_lookup_compressed.homogeneous();
@@ -392,11 +390,6 @@ where
 
         let zeta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
         let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, n);
-        println!(
-            "Prover L0: {:?}, LN-1: {:?}",
-            lagrange_at_zeta[0],
-            lagrange_at_zeta[n - 1]
-        );
 
         // Evaluate at ζ in lagrange form
         let query_evals: Vec<_> = queries
@@ -433,7 +426,6 @@ where
 
         // Squeeze the batching challenge α.
         let alpha: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
-        println!("Prover alpha: {:?}", alpha);
 
         // Convert t_chunks to evaluation form for unified IPA
         let omega = domain.get_omega();
@@ -471,53 +463,12 @@ where
             b_embedded.extend_from_slice(&lagrange_at_zeta);
         }
         debug_assert_eq!(b_embedded.len(), total_len);
-        println!(
-            "Prover b[0], b[n], b[2n], b[total_len-1]: {:?}, {:?}, {:?}, {:?}",
-            b_embedded[0],
-            b_embedded[n],
-            b_embedded[2 * n],
-            b_embedded[total_len - 1]
-        );
-
-        let f_commit =
-            best_multiexp(&f_embedded, &pp.ipa_params.ck[..f_embedded.len()]).to_affine();
-
-        let c_combined_prover: C = openings
-            .iter()
-            .enumerate()
-            .fold(C::CurveExt::identity(), |acc, (i, o)| {
-                let alpha_pow = alpha.pow_vartime([i as u64]);
-                acc + o.commitment.to_curve() * alpha_pow
-            })
-            .to_affine();
-
-        println!("f_commit = {:?}", f_commit);
-        println!("c_combined_prover = {:?}", c_combined_prover);
-
-        let inner_product: C::ScalarExt = f_embedded
-            .iter()
-            .zip(b_embedded.iter())
-            .map(|(a, b)| *a * b)
-            .fold(C::ScalarExt::ZERO, |acc, x| acc + x);
-
-        let v_combined_prover: C::ScalarExt =
-            openings
-                .iter()
-                .enumerate()
-                .fold(C::ScalarExt::ZERO, |acc, (i, o)| {
-                    let alpha_pow = alpha.pow_vartime([i as u64]);
-                    acc + alpha_pow * o.eval
-                });
-
-        println!("inner_product = {:?}", inner_product);
-        println!("v_combined_prover = {:?}", v_combined_prover);
 
         // Run IPA on (f, ζ).
         // The IPA prover doesn't need C_f or v_f as inputs — it just commits
         // to the polynomial f and proves the inner product.  The verifier
         // will reconstruct C_f from public data and check.
         let opening_proof = ipa_prove_single(&pp.ipa_params, &f_embedded, &b_embedded, transcript);
-        println!("IPA proof generated");
 
         Ok(GateDeciderProof {
             t_commitments,
@@ -550,8 +501,6 @@ where
         proof: &GateDeciderProof<C>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<(), VerifyError> {
-        println!("Verifier CK_LEN: {}", vp.ipa_params.ck.len());
-
         let n = 1usize << vp.k;
         let n_u64 = n as u64;
 
@@ -590,11 +539,6 @@ where
         let zeta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
         let domain = EvaluationDomain::<C::ScalarExt>::new(vp.gate_degree as u32, vp.k as u32);
         let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, 1 << vp.k);
-        println!(
-            "Verifier L0: {:?}, LN-1: {:?}",
-            lagrange_at_zeta[0],
-            lagrange_at_zeta[n - 1]
-        );
 
         // ----------------------------------------------------------------
         // Step 1: symbolic gate-identity check at ζ.
@@ -647,7 +591,6 @@ where
         }
 
         let alpha: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
-        println!("Verifier alpha: {:?}", alpha);
 
         // ----------------------------------------------------------------
         // Step 3: combine commitments and evaluations.
@@ -697,13 +640,6 @@ where
         for _ in 0..num_blocks {
             b_embedded.extend_from_slice(&lagrange_at_zeta);
         }
-        println!(
-            "Verifier b[0], b[n], b[2n], b[total_len-1]: {:?}, {:?}, {:?}, {:?}",
-            b_embedded[0],
-            b_embedded[n],
-            b_embedded[2 * n],
-            b_embedded[total_len - 1]
-        );
 
         ipa_verify_single(
             &vp.ipa_params,

@@ -35,8 +35,8 @@ pub struct IpaProof<C: CurveAffine> {
 // =====================================================================
 #[derive(Clone, Debug)]
 pub struct IpaParams<C: CurveAffine> {
-    pub ck: Arc<CommitmentKey<C>>,   // generators live here
-    pub aux: C,               // the U — separate, independent point
+    pub ck: Arc<CommitmentKey<C>>, // generators live here
+    pub aux: C,                    // the U — separate, independent point
 }
 
 impl<C: CurveAffine> IpaParams<C> {
@@ -71,8 +71,8 @@ impl<C: CurveAffine> IpaParams<C> {
 
 pub fn ipa_prove_single<C: CurveAffine, RO>(
     params: &IpaParams<C>,
-    a: &[C::Scalar],      // the polynomial in whatever basis
-    b: &[C::Scalar],      // the basis vector evaluated at the point
+    a: &[C::Scalar], // the polynomial in whatever basis
+    b: &[C::Scalar], // the basis vector evaluated at the point
     transcript: &mut RO,
 ) -> IpaProof<C>
 where
@@ -81,10 +81,7 @@ where
 {
     let n = a.len();
     assert!(n.is_power_of_two(), "IPA requires power-of-2 length");
-    assert!(
-        n <= params.ck.len(), 
-        "polynomial longer than generators"
-    );
+    assert!(n <= params.ck.len(), "polynomial longer than generators");
 
     let k = n.trailing_zeros() as usize;
 
@@ -96,7 +93,6 @@ where
     let mut rounds = Vec::with_capacity(k);
 
     for _round in 0..k {
-        println!("ROUND: {}", _round);
         let half = a.len() / 2;
         let (a_L, a_R) = a.split_at(half);
         let (b_L, b_R) = b.split_at(half);
@@ -130,17 +126,17 @@ where
         let new_a: Vec<C::ScalarExt> = a_L
             .iter()
             .zip(a_R.iter())
-            .map(|(l, r)| *l + u_inv * r)
+            .map(|(l, r)| *l * u + u_inv * r) // was: *l + u_inv * r
             .collect();
         let new_b: Vec<C::ScalarExt> = b_L
             .iter()
             .zip(b_R.iter())
-            .map(|(l, r)| *l + u * r)
+            .map(|(l, r)| *l * u_inv + u * r) // was: *l + u * r
             .collect();
         let new_g: Vec<C> = g_L
             .iter()
             .zip(g_R.iter())
-            .map(|(l, r)| (l.to_curve() + r.to_curve() * u).to_affine())
+            .map(|(l, r)| (l.to_curve() * u_inv + r.to_curve() * u).to_affine()) // was: l.to_curve() + r.to_curve() * u
             .collect();
 
         a = new_a;
@@ -170,7 +166,7 @@ pub fn ipa_verify_single<C: CurveAffine, RO>(
     params: &IpaParams<C>,
     commitment: C,
     claimed_eval: C::ScalarExt,
-    b: &[C::Scalar],      // the basis vector evaluated at the point
+    b: &[C::Scalar], // the basis vector evaluated at the point
     proof: &IpaProof<C>,
     transcript: &mut RO,
 ) -> Result<(), VerifyError>
@@ -222,7 +218,9 @@ where
     if c_prime == expected {
         Ok(())
     } else {
-        Err(VerifyError::OpeningFailed { error: format!("c': {:?}, expected: {:?}", c_prime, expected) })
+        Err(VerifyError::OpeningFailed {
+            error: format!("c': {:?}, expected: {:?}", c_prime, expected),
+        })
     }
 }
 
@@ -308,11 +306,257 @@ fn compute_b_after_rounds<F: Field>(b: &[F], challenges: &[F]) -> F {
     for u in challenges {
         let half = b.len() / 2;
         let u_inv = u.invert().unwrap();
-        let new_b: Vec<F> = b[..half].iter().zip(b[half..].iter())
+        let new_b: Vec<F> = b[..half]
+            .iter()
+            .zip(b[half..].iter())
             .map(|(l, r)| *l * u_inv + *r * u)
             .collect();
         b = new_b;
     }
     debug_assert_eq!(b.len(), 1);
     b[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::poseidon::{PoseidonRO, ROPair};
+
+    use super::*;
+    use halo2_proofs::halo2curves::{
+        bn256::{Fr, G1Affine},
+        ff::PrimeFieldBits,
+        group::prime::PrimeCurveAffine,
+    };
+    use rand::{rngs::OsRng, RngCore};
+    use serde::Serialize;
+
+    const T: usize = 5;
+    const RATE: usize = 4;
+
+    type RO<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OffCircuit;
+    type ROArgs<F> = <RO<F> as ROTrait<F>>::Constants;
+
+    // Helper: build a CommitmentKey with n generators by hash-to-curve.
+    fn setup_ck(n: usize) -> Arc<CommitmentKey<G1Affine>> {
+        let ck = CommitmentKey::setup(n, b"sirius-ipa-test");
+        Arc::new(ck)
+    }
+
+    // Helper: build a fresh transcript.
+    fn fresh_transcript<F>() -> RO<F>
+    where
+        F: PrimeField + PrimeFieldBits + FromUniformBytes<64> + Serialize,
+    {
+        let constants = ROArgs::<F>::new(/* r_f */ 10, /* r_p */ 60);
+        RO::<F>::new(constants)
+    }
+
+    // Helper: compute the Lagrange basis at zeta for a domain of size n.
+    fn lagrange_basis_at(zeta: Fr, n: usize, omega: Fr) -> Vec<Fr> {
+        // Naive O(n²) for testing — just for correctness.
+        let mut lagrange = Vec::with_capacity(n);
+        for i in 0..n {
+            let omega_i = omega.pow_vartime([i as u64]);
+            let zeta_minus_omega_i = zeta - omega_i;
+            // L_i(zeta) = (omega^i · (zeta^n - 1)) / (n · (zeta - omega^i))
+            let zeta_n = zeta.pow_vartime([n as u64]);
+            let numerator = omega_i * (zeta_n - Fr::ONE);
+            let denominator = Fr::from(n as u64) * zeta_minus_omega_i;
+            lagrange.push(numerator * denominator.invert().unwrap());
+        }
+        lagrange
+    }
+
+    #[test]
+    fn ipa_basic_roundtrip_coefficient_basis() {
+        // Test: open a polynomial in coefficient basis at a random point.
+        // b = [1, ζ, ζ², ..., ζ^{n-1}].
+        let n = 16;
+        let ck = setup_ck(n);
+        let params = IpaParams::from_ck(&ck);
+
+        let mut rng = OsRng;
+        let a: Vec<Fr> = (0..n).map(|_| Fr::from(rng.next_u64())).collect();
+        let zeta = Fr::from(rng.next_u64());
+        let b: Vec<Fr> = powers_of(zeta, n);
+
+        // Compute commitment and claimed eval.
+        let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
+        let claimed_eval: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
+
+        // Prove.
+        let mut prover_transcript = fresh_transcript();
+        let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
+
+        // Verify.
+        let mut verifier_transcript = fresh_transcript();
+        let result = ipa_verify_single(
+            &params,
+            commitment,
+            claimed_eval,
+            &b,
+            &proof,
+            &mut verifier_transcript,
+        );
+
+        assert!(result.is_ok(), "honest proof should verify");
+    }
+
+    #[test]
+    fn ipa_basic_roundtrip_lagrange_basis() {
+        // Test: open a polynomial in Lagrange basis at a random point.
+        // b = [L_0(ζ), L_1(ζ), ..., L_{n-1}(ζ)].
+        let n = 16;
+        let ck = setup_ck(n);
+        let params = IpaParams::from_ck(&ck);
+
+        let omega = Fr::ROOT_OF_UNITY;
+        let mut rng = OsRng;
+        let a: Vec<Fr> = (0..n).map(|_| Fr::from(rng.next_u64())).collect();
+        let zeta = Fr::from(rng.next_u64());
+        let b: Vec<Fr> = lagrange_basis_at(zeta, n, omega);
+
+        let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
+        let claimed_eval: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
+
+        let mut prover_transcript = fresh_transcript();
+        let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
+
+        let mut verifier_transcript = fresh_transcript();
+        let result = ipa_verify_single(
+            &params,
+            commitment,
+            claimed_eval,
+            &b,
+            &proof,
+            &mut verifier_transcript,
+        );
+
+        assert!(result.is_ok(), "honest Lagrange-basis proof should verify");
+    }
+
+    #[test]
+    fn ipa_rejects_wrong_eval() {
+        // Same as basic test, but with a deliberately wrong claimed eval.
+        let n = 16;
+        let ck = setup_ck(n);
+        let params = IpaParams::from_ck(&ck);
+
+        let mut rng = OsRng;
+        let a: Vec<Fr> = (0..n).map(|_| Fr::from(rng.next_u64())).collect();
+        let zeta = Fr::from(rng.next_u64());
+        let b: Vec<Fr> = powers_of(zeta, n);
+        let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
+        let real_eval: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
+        let wrong_eval = real_eval + Fr::ONE;
+
+        let mut prover_transcript = fresh_transcript();
+        // Even if we prove against the wrong claim, the prover doesn't error
+        // (the prover doesn't check correctness, just proves what's stated).
+        let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
+
+        let mut verifier_transcript = fresh_transcript();
+        let result = ipa_verify_single(
+            &params,
+            commitment,
+            wrong_eval, // ← LIE
+            &b,
+            &proof,
+            &mut verifier_transcript,
+        );
+
+        assert!(result.is_err(), "wrong claim should be rejected");
+    }
+
+    #[test]
+    fn ipa_size_2_smallest_case() {
+        // Smallest non-trivial size: n=2, k=1 (one round).
+        // This is easiest to debug if the IPA is broken.
+        let n = 2;
+        let ck = setup_ck(n);
+        let params = IpaParams::from_ck(&ck);
+
+        let a = vec![Fr::from(3), Fr::from(7)];
+        let zeta = Fr::from(11);
+        let b = vec![Fr::ONE, zeta]; // coefficient basis
+
+        let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
+        let claimed_eval = a[0] + a[1] * zeta; // = 3 + 7 · 11 = 80
+        assert_eq!(claimed_eval, Fr::from(80));
+
+        let mut prover_transcript = fresh_transcript();
+        let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
+        assert_eq!(proof.rounds.len(), 1);
+
+        let mut verifier_transcript = fresh_transcript();
+        let result = ipa_verify_single(
+            &params,
+            commitment,
+            claimed_eval,
+            &b,
+            &proof,
+            &mut verifier_transcript,
+        );
+
+        assert!(result.is_ok(), "n=2 should verify");
+    }
+
+    #[test]
+    fn compute_s_matches_iterative_g_folding() {
+        // Test that compute_s produces the same g_final as the prover's
+        // iterative g folding.
+        let n = 8;
+        let k = 3;
+        let ck = setup_ck(n);
+
+        // Pick arbitrary challenges.
+        let challenges: Vec<Fr> = (1..=k as u64).map(Fr::from).collect();
+        let challenges_inv: Vec<Fr> = challenges.iter().map(|u| u.invert().unwrap()).collect();
+
+        // Method 1: closed form via compute_s.
+        let s = compute_s(&challenges, &challenges_inv, n);
+        let g_from_s = best_multiexp(&s, &ck[..n]).to_affine();
+
+        // Method 2: iterative folding (mimicking the prover).
+        let mut g: Vec<G1Affine> = ck[..n].to_vec();
+        for u in &challenges {
+            let u_inv = u.invert().unwrap();
+            let half = g.len() / 2;
+            let new_g: Vec<G1Affine> = g[..half]
+                .iter()
+                .zip(g[half..].iter())
+                .map(|(l, r)| (l.to_curve() * u_inv + r.to_curve() * u).to_affine())
+                .collect();
+            g = new_g;
+        }
+        assert_eq!(g.len(), 1);
+        let g_from_folding = g[0];
+
+        assert_eq!(
+            g_from_s, g_from_folding,
+            "compute_s and iterative folding must agree on g_final"
+        );
+    }
+
+    #[test]
+    fn compute_b_after_rounds_matches_iterative_b_folding() {
+        // Same test for b.
+        let n = 8;
+        let k = 3;
+        let zeta = Fr::from(13);
+        let b_initial: Vec<Fr> = powers_of(zeta, n);
+
+        let challenges: Vec<Fr> = (1..=k as u64).map(Fr::from).collect();
+
+        // Method 1: compute_b_after_rounds.
+        let b_final = compute_b_after_rounds(&b_initial, &challenges);
+
+        // Method 2: closed form (assuming coefficient basis, b = powers of zeta).
+        let b_final_closed = compute_b_final(&challenges, zeta);
+
+        assert_eq!(
+            b_final, b_final_closed,
+            "iterative folding and closed form must agree for coefficient basis"
+        );
+    }
 }
