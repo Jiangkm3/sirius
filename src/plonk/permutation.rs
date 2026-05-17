@@ -13,7 +13,7 @@ use crate::polynomial::sparse::SparseMatrix;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
-    columns: Vec<Column<Any>>,
+    pub(crate) columns: Vec<Column<Any>>,
     /// Mapping of the actual copies done.
     pub(crate) mapping: Vec<Vec<(usize, usize)>>,
     /// Some aux data used to swap positions directly when sorting.
@@ -116,8 +116,8 @@ impl Assembly {
 
 #[derive(Clone, PartialEq, Default)]
 pub(crate) struct PermutationData {
-    columns: Box<[Column<Any>]>,
-    mapping: Box<[Vec<(usize, usize)>]>,
+    pub(crate) columns: Box<[Column<Any>]>,
+    pub(crate) mapping: Box<[Vec<(usize, usize)>]>,
 }
 
 impl From<&Assembly> for PermutationData {

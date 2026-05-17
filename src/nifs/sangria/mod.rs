@@ -31,10 +31,7 @@ use crate::{
         eval::{Error as EvalError, GetDataForEval, PlonkEvalDomain},
         PlonkStructure, PlonkWitness,
     },
-    polynomial::{
-        graph_evaluator::GraphEvaluator,
-        sparse::SparseMatrix,
-    },
+    polynomial::{graph_evaluator::GraphEvaluator, sparse::SparseMatrix},
     poseidon::ROTrait,
     sps::{Error as SpsError, SpecialSoundnessVerifier},
 };
@@ -42,6 +39,7 @@ use crate::{
 pub mod accumulator;
 pub mod decider;
 pub mod ipa;
+pub mod permutation;
 
 // =====================================================================
 // Cross-term types
@@ -121,7 +119,11 @@ where
                                 let mut scratch = evaluator.instance();
                                 let mut out = Vec::with_capacity(end - start);
                                 for row in start..end {
-                                    let v = evaluator.evaluate_with_scratch(&data, row, &mut scratch)?;
+                                    let v = evaluator.evaluate_with_scratch(
+                                        &data,
+                                        row,
+                                        &mut scratch,
+                                    )?;
                                     out.push(v);
                                 }
                                 Ok::<Vec<<C as CurveAffine>::ScalarExt>, EvalError>(out)
@@ -347,7 +349,10 @@ where
                     }
                 })
             })
-            .try_reduce(|| 0, |mismatch_count, is_missed| Ok(mismatch_count + is_missed))
+            .try_reduce(
+                || 0,
+                |mismatch_count, is_missed| Ok(mismatch_count + is_missed),
+            )
             .map(|mismatch_count| {
                 Some(plonk::Error::EvaluationMismatch {
                     mismatch_count: NonZeroUsize::new(mismatch_count)?,
@@ -397,10 +402,16 @@ where
 
         for (row, col, value) in P.iter() {
             if *row >= z_len {
-                panic!("invalid matrix multiply: row {} out of bounds {}", row, z_len);
+                panic!(
+                    "invalid matrix multiply: row {} out of bounds {}",
+                    row, z_len
+                );
             }
             if *col >= z_len {
-                panic!("invalid matrix multiply: col {} out of bounds {}", col, z_len);
+                panic!(
+                    "invalid matrix multiply: col {} out of bounds {}",
+                    col, z_len
+                );
             }
             result[*row] += *value * z_at(*col);
         }
@@ -462,22 +473,20 @@ where
                     .all(|instances| instances.get_step_circuit_instances().is_empty()));
                 Ok(())
             }
-            accumulator::SCInstancesHashAcc::Hash(stored_hash) => {
-                pub_instances
-                    .iter()
-                    .fold(
-                        instances_accumulator_computation::get_initial_sc_instances_accumulator::<C>(),
-                        |acc, instances| {
-                            instances_accumulator_computation::absorb_in_sc_instances_accumulator::<C>(
-                                &acc,
-                                instances.get_step_circuit_instances(),
-                            )
-                        },
-                    )
-                    .ne(&stored_hash)
-                    .then_some(VerifyError::InstanceMismatch)
-                    .err_or(())
-            }
+            accumulator::SCInstancesHashAcc::Hash(stored_hash) => pub_instances
+                .iter()
+                .fold(
+                    instances_accumulator_computation::get_initial_sc_instances_accumulator::<C>(),
+                    |acc, instances| {
+                        instances_accumulator_computation::absorb_in_sc_instances_accumulator::<C>(
+                            &acc,
+                            instances.get_step_circuit_instances(),
+                        )
+                    },
+                )
+                .ne(&stored_hash)
+                .then_some(VerifyError::InstanceMismatch)
+                .err_or(()),
         }
     }
 
@@ -497,11 +506,23 @@ where
         pub_instances: &[Vec<Vec<C::ScalarExt>>],
     ) -> Result<(), Vec<VerifyError>> {
         let mut errors = vec![];
-        if let Err(err) = Self::is_sat_accumulation(S, acc) { errors.push(err); }
-        if let Err(err) = Self::is_sat_permutation(S, acc)  { errors.push(err); }
-        if let Err(err) = Self::is_sat_witness_commit(ck, acc) { errors.push(err); }
-        if let Err(err) = Self::is_sat_pub_instances(acc, pub_instances) { errors.push(err); }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if let Err(err) = Self::is_sat_accumulation(S, acc) {
+            errors.push(err);
+        }
+        if let Err(err) = Self::is_sat_permutation(S, acc) {
+            errors.push(err);
+        }
+        if let Err(err) = Self::is_sat_witness_commit(ck, acc) {
+            errors.push(err);
+        }
+        if let Err(err) = Self::is_sat_pub_instances(acc, pub_instances) {
+            errors.push(err);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -536,13 +557,12 @@ where
         ck: &Arc<CommitmentKey<C>>,
         layout: QueryLayout,
     ) -> Result<(GateDeciderProverParam<C>, GateDeciderVerifierParam<C>), Error> {
-        // Reconstruct a curve point for setup_decider_params to consume.
-        // (The decider's setup function takes a curve point, then extracts
-        // coordinates — same shape as the existing setup_params.)
-        //
-        // Since pp.pp_digest is already (x, y) coordinates, we just hand
-        // them through directly in the decider params.
-        decider::setup_decider_params_from_digest(pp.pp_digest, pp.S.clone(), ck, layout)
+        decider::setup_decider_params_from_digest::<C, MARKERS_LEN>(
+            pp.pp_digest,
+            pp.S.clone(),
+            ck,
+            layout,
+        )
     }
 
     /// Produce a decider proof on the final accumulator.
@@ -557,7 +577,13 @@ where
         final_acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<GateDeciderProof<C>, Error> {
-        Self::prove_decider_gate_part(decider_pp, layout, final_acc, transcript)
+        Self::prove_decider_gate_part(
+            decider_pp,
+            layout,
+            &decider_pp.perm_params,
+            final_acc,
+            transcript,
+        )
     }
 
     /// Verify a decider proof against the final accumulator's instance
@@ -580,9 +606,14 @@ where
         proof: &GateDeciderProof<C>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<(), VerifyError> {
-        Self::verify_decider_gate_part(decider_vp, U_final, proof, transcript)?;
+        Self::verify_decider_gate_part(
+            decider_vp,
+            &decider_vp.perm_params,
+            U_final,
+            proof,
+            transcript,
+        )?;
         Self::is_sat_pub_instances_with_instance(U_final, pub_instances)?;
-        // TODO: when added, call verify_decider_permutation_part here.
         Ok(())
     }
 }

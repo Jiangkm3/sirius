@@ -94,6 +94,8 @@ where
     let mut rounds = Vec::with_capacity(k);
 
     for _round in 0..k {
+        let round_start = std::time::Instant::now();
+
         let half = a.len() / 2;
         let (a_L, a_R) = a.split_at(half);
         let (b_L, b_R) = b.split_at(half);
@@ -148,6 +150,9 @@ where
         a = new_a;
         b = new_b;
         g = new_g;
+
+        let round_elapsed = round_start.elapsed();
+        println!("ROUND {}, elapsed: {} ms", _round, round_elapsed.as_millis());
     }
 
     debug_assert_eq!(a.len(), 1);

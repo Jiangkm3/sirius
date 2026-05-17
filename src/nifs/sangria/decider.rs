@@ -4,6 +4,10 @@ use std::sync::Arc;
 use crate::ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
 use crate::fft::best_fft;
 use crate::nifs::sangria::ipa::{ipa_prove_single, ipa_verify_single, IpaParams, IpaProof};
+use crate::nifs::sangria::permutation::{
+    build_permutation_grand_product, build_permutation_params, gather_commitments_with_permutation,
+    gather_openings_with_permutation, l_0_evals, shift_by_omega, PermutationParams,
+};
 use crate::{
     commitment::CommitmentKey,
     constants::NUM_CHALLENGE_BITS,
@@ -34,53 +38,49 @@ use rayon::prelude::*;
 pub struct GateDeciderProof<C: CurveAffine> {
     pub t_commitments: Vec<C>,
     pub advice_column_commitments: Vec<C>,
+    pub z_commitment: C,
     pub evals: GateEvaluations<C::ScalarExt>,
     pub opening_proof: IpaProof<C>,
+    pub opening_proof_zw: IpaProof<C>,
 }
 
 // =====================================================================
 // One entry per polynomial being opened.
 // =====================================================================
 
-struct OpeningEntry<'a, C: CurveAffine> {
+pub(crate) struct OpeningEntry<'a, C: CurveAffine> {
     /// The polynomial in coefficient form (length = ipa_params.generators.len()).
     /// For columns stored as evaluations on H, this is the iFFT'd coefficient vector.
-    coeffs: &'a [C::ScalarExt],
+    pub(crate) coeffs: &'a [C::ScalarExt],
     /// Its commitment (already a Pedersen MSM in coefficient form, since
     /// ck.commit(c) = Σ cᵢ Gᵢ).
-    commitment: C,
+    pub(crate) commitment: C,
     /// Its claimed evaluation at ζ.
-    eval: C::ScalarExt,
-    generator_offset: usize,
+    pub(crate) eval: C::ScalarExt,
+    pub(crate) generator_offset: usize,
 }
 
 /// Evaluations of all polynomials at the challenge point `ζ` (and `ζω` for
 /// polynomials with non-zero rotations referenced by the gate expression).
 #[derive(Clone, Debug)]
 pub struct GateEvaluations<F: PrimeField> {
-    /// Per-query evaluations. Indexed identically to how `Query::index` is
-    /// laid out in the gate expression. For each query that has rotation r,
-    /// this is the evaluation of the corresponding polynomial at ζ · ωʳ.
     pub queries: Vec<F>,
-
-    /// Evaluation of E(X) at ζ.
     pub e_eval: F,
-
-    /// Evaluations of each quotient chunk t_i(X) at ζ.
     pub t_chunks: Vec<F>,
+    pub z_at_zeta: F,
+    pub z_at_zeta_omega: F,
+    pub s_at_zeta: Vec<F>,
+    pub id_at_zeta: Vec<F>,
 }
 
 /// Prover parameters for the gate-identity decider check.
 pub struct GateDeciderProverParam<C: CurveAffine> {
     pub S: PlonkStructure<C::ScalarExt>,
     pub pp_digest: (C::Base, C::Base),
-
-    /// Commitments to fixed columns, one per column.
     pub fixed_commitments: Vec<C>,
-    /// Commitments to selector columns, one per column.
     pub selector_commitments: Vec<C>,
-    /// IPA setup parameters.
     pub ipa_params: IpaParams<C>,
+    pub perm_params: PermutationParams<C>,
 }
 
 /// Verifier parameters for the gate-identity decider check.
@@ -92,10 +92,10 @@ pub struct GateDeciderVerifierParam<C: CurveAffine> {
     pub gate_expression: Expression<C::ScalarExt>,
     pub query_layout: QueryLayout,
     pub gate_degree: usize,
-
     pub fixed_commitments: Vec<C>,
     pub selector_commitments: Vec<C>,
     pub ipa_params: IpaParams<C>,
+    pub perm_params: PermutationParams<C>,
 }
 
 /// Index-range layout for Query::index resolution.
@@ -105,12 +105,10 @@ pub struct QueryLayout {
     pub num_selectors: usize,
     pub num_fixed: usize,
     pub num_advice: usize,
-    // Convention assumed below: selectors, then fixed, then advice.
-    // Adjust if your codebase uses a different order.
 }
 
 impl QueryLayout {
-    fn resolve(&self, index: usize) -> ResolvedQuery {
+    pub(crate) fn resolve(&self, index: usize) -> ResolvedQuery {
         if index < self.num_selectors {
             ResolvedQuery::Selector(index)
         } else if index < self.num_selectors + self.num_fixed {
@@ -123,7 +121,8 @@ impl QueryLayout {
     }
 }
 
-enum ResolvedQuery {
+#[derive(Clone, Debug)]
+pub(crate) enum ResolvedQuery {
     Selector(usize),
     Fixed(usize),
     Advice(usize),
@@ -132,75 +131,7 @@ enum ResolvedQuery {
 // =====================================================================
 // Setup
 // =====================================================================
-
-pub fn setup_decider_params<C: CurveAffine>(
-    pp_digest: C,
-    S: PlonkStructure<C::ScalarExt>,
-    ck: &Arc<CommitmentKey<C>>,
-    layout: QueryLayout,
-) -> Result<(GateDeciderProverParam<C>, GateDeciderVerifierParam<C>), Error>
-where
-    C::ScalarExt: PrimeField + WithSmallOrderMulGroup<3>,
-{
-    let pp_digest_xy = {
-        let c = pp_digest.coordinates().unwrap();
-        (*c.x(), *c.y())
-    };
-
-    // Commit each fixed column.
-    let fixed_commitments: Vec<C> = S
-        .fixed_columns
-        .iter()
-        .map(|col| ck.commit(col))
-        .collect::<Result<_, _>>()?;
-
-    // Convert each selector to field elements, then commit.
-    let selector_commitments: Vec<C> = S
-        .selectors
-        .iter()
-        .map(|sel| {
-            let as_field = selector_as_field::<C::ScalarExt>(sel);
-            ck.commit(&as_field)
-        })
-        .collect::<Result<_, _>>()?;
-
-    let ipa_params = IpaParams::from_ck(ck);
-
-    // Compute ω for the verifier (the n-th root of unity).
-    let domain = EvaluationDomain::<C::ScalarExt>::new(
-        S.custom_gates_lookup_compressed.homogeneous_degree() as u32,
-        S.k as u32,
-    );
-    let omega = domain.get_omega();
-
-    let gate_expression = S.custom_gates_lookup_compressed.homogeneous().clone();
-    let gate_degree = S.custom_gates_lookup_compressed.homogeneous_degree();
-    let k = S.k;
-
-    let pp = GateDeciderProverParam {
-        S,
-        pp_digest: pp_digest_xy,
-        fixed_commitments: fixed_commitments.clone(),
-        selector_commitments: selector_commitments.clone(),
-        ipa_params: ipa_params.clone(),
-    };
-
-    let vp = GateDeciderVerifierParam {
-        pp_digest: pp_digest_xy,
-        k,
-        omega,
-        gate_expression,
-        query_layout: layout,
-        gate_degree,
-        fixed_commitments,
-        selector_commitments,
-        ipa_params,
-    };
-
-    Ok((pp, vp))
-}
-
-pub fn setup_decider_params_from_digest<C: CurveAffine>(
+pub fn setup_decider_params_from_digest<C: CurveAffine, const MARKERS_LEN: usize>(
     pp_digest_xy: (C::Base, C::Base),
     S: PlonkStructure<C::ScalarExt>,
     ck: &Arc<CommitmentKey<C>>,
@@ -209,8 +140,6 @@ pub fn setup_decider_params_from_digest<C: CurveAffine>(
 where
     C::ScalarExt: PrimeField + WithSmallOrderMulGroup<3>,
 {
-    // Same body as setup_decider_params, but skip the coordinate extraction
-    // since the caller already did it.
     let fixed_commitments: Vec<C> = S
         .fixed_columns
         .iter()
@@ -229,13 +158,20 @@ where
     let ipa_params = IpaParams::from_ck(ck);
 
     let gate_degree = S.custom_gates_lookup_compressed.homogeneous_degree();
+    let num_advice = S.num_advice_columns;
+    let num_active = 1 + num_advice;
+    let perm_recur_degree_bound = num_active + 2;
+    let combined_j = std::cmp::max(gate_degree, perm_recur_degree_bound);
 
-    let domain = EvaluationDomain::<C::ScalarExt>::new(gate_degree as u32, S.k as u32);
+    let domain = EvaluationDomain::<C::ScalarExt>::new(combined_j as u32, S.k as u32);
     let omega = domain.get_omega();
 
     let gate_expression = S.custom_gates_lookup_compressed.homogeneous().clone();
-    let gate_degree = S.custom_gates_lookup_compressed.homogeneous_degree();
     let k = S.k;
+
+    // build permutation preprocessing.
+    let perm_params =
+        build_permutation_params::<C, MARKERS_LEN>(&S, ck, omega, S.num_advice_columns)?;
 
     let pp = GateDeciderProverParam {
         S,
@@ -243,6 +179,7 @@ where
         fixed_commitments: fixed_commitments.clone(),
         selector_commitments: selector_commitments.clone(),
         ipa_params: ipa_params.clone(),
+        perm_params: perm_params.clone(),
     };
 
     let vp = GateDeciderVerifierParam {
@@ -251,32 +188,31 @@ where
         omega,
         gate_expression,
         query_layout: layout,
-        gate_degree,
+        gate_degree: combined_j,
         fixed_commitments,
         selector_commitments,
         ipa_params,
+        perm_params,
     };
 
     Ok((pp, vp))
 }
 
-// =====================================================================
-// Prover side
-// =====================================================================
-
 impl<C: CurveAffine, const MARKERS_LEN: usize> VanillaFS<C, MARKERS_LEN>
 where
     C::Base: PrimeFieldBits + FromUniformBytes<64>,
-    C::ScalarExt: PrimeFieldBits + FromUniformBytes<64>,
+    C::ScalarExt: PrimeFieldBits + FromUniformBytes<64> + WithSmallOrderMulGroup<3>,
 {
-    /// Produce the gate-identity portion of a decider proof.
-    ///
-    /// This replaces the row-by-row work of `is_sat_accumulation` with a
-    /// polynomial identity check at a single random point ζ, supported by
-    /// a quotient polynomial commitment and IPA batch opening.
+    // =====================================================================
+    // Prover side
+    // =====================================================================
+
+    /// Produce a decider proof covering both the gate identity and
+    /// the permutation argument.
     pub fn prove_decider_gate_part(
         pp: &GateDeciderProverParam<C>,
         layout: &QueryLayout,
+        perm_params: &PermutationParams<C>,
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<GateDeciderProof<C>, Error> {
@@ -284,14 +220,18 @@ where
         let n = 1usize << pp.S.k;
         let gate_expr = pp.S.custom_gates_lookup_compressed.homogeneous();
         let gate_degree = pp.S.custom_gates_lookup_compressed.homogeneous_degree();
+        let num_active = perm_params.num_active;
+        let perm_recur_degree_bound = num_active + 2;
+        let combined_j = std::cmp::max(gate_degree, perm_recur_degree_bound);
 
-        let domain = EvaluationDomain::<C::ScalarExt>::new(gate_degree as u32, pp.S.k as u32);
+        let domain = EvaluationDomain::<C::ScalarExt>::new(combined_j as u32, pp.S.k as u32);
+        let omega = domain.get_omega();
+
         transcript.absorb(U);
 
         // ----------------------------------------------------------------
-        // Phase A: build the quotient polynomial t(X)
+        // Phase A: split witness, build evaluation-form columns.
         // ----------------------------------------------------------------
-
         let advice_columns = split_rounds_into_columns(&W.W, &pp.S.round_sizes, n);
         let selector_field: Vec<Vec<C::ScalarExt>> =
             pp.S.selectors
@@ -299,6 +239,98 @@ where
                 .map(|sel| selector_as_field::<C::ScalarExt>(sel))
                 .collect();
 
+        // ----------------------------------------------------------------
+        // Phase B: per-column commitments of advice using offset generators.
+        //
+        // These will be summed by the verifier and checked against
+        // U.W_commitments[0], binding the proof to the folded accumulator.
+        // ----------------------------------------------------------------
+        let advice_commitments_per_column: Vec<C> = advice_columns
+            .iter()
+            .enumerate()
+            .map(|(col_idx, col_evals)| {
+                let gen_start = col_idx * n;
+                let gen_end = gen_start + n;
+                let generators_slice = &pp.ipa_params.ck[gen_start..gen_end];
+                best_multiexp(col_evals, generators_slice).to_affine()
+            })
+            .collect();
+
+        for c in &advice_commitments_per_column {
+            transcript.absorb_point(c);
+        }
+
+        // ----------------------------------------------------------------
+        // Phase C: derive β, γ for the permutation argument.
+        //
+        // These come AFTER advice commitments so the witness is bound
+        // before challenges are chosen.
+        // ----------------------------------------------------------------
+        let beta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, beta);
+        let gamma: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, gamma);
+
+        // ----------------------------------------------------------------
+        // Phase D: build the grand product polynomial Z.
+        //
+        // Active columns for the permutation:
+        //   - Column 0: markers (virtual, built from U.consistency_markers).
+        //   - Columns 1..num_advice+1: advice columns.
+        //
+        // Build the virtual markers polynomial: length n, first MARKERS_LEN
+        // slots hold the markers, rest are zero.
+        // ----------------------------------------------------------------
+        let mut markers_poly = vec![C::ScalarExt::ZERO; n];
+        for (j, m) in U.consistency_markers.iter().enumerate() {
+            markers_poly[j] = *m;
+        }
+
+        let mut active_witness: Vec<Vec<C::ScalarExt>> = Vec::with_capacity(perm_params.num_active);
+        active_witness.push(markers_poly.clone());
+        for col_idx in 0..pp.S.num_advice_columns {
+            active_witness.push(advice_columns[col_idx].clone());
+        }
+        debug_assert_eq!(active_witness.len(), perm_params.num_active);
+
+        let z_evals = build_permutation_grand_product(
+            &active_witness,
+            &perm_params.id_polys,
+            &perm_params.s_polys,
+            beta,
+            gamma,
+            n,
+        );
+
+        let z_commitment = pp.ipa_params.ck.commit(&z_evals)?;
+        transcript.absorb_point(&z_commitment);
+
+        // ----------------------------------------------------------------
+        // Phase E: derive λ — the weight for combining the gate identity
+        // and the permutation identity into a single quotient.
+        // ----------------------------------------------------------------
+        let lambda: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, lambda);
+
+        // ----------------------------------------------------------------
+        // Phase F: build the combined quotient polynomial.
+        //
+        // Combined identity:
+        //   g_combined(X) = (gate_hom(W, u)(X) - E(X))            // gate identity
+        //                 + λ   · perm_recurrence(X)              // permutation rec.
+        //                 + λ²  · perm_boundary(X)                // Z(ω⁰) = 1
+        //
+        // where:
+        //   perm_recurrence(X) = Z(ω · X) · denom(X) - Z(X) · num(X)
+        //   perm_boundary(X)   = L_0(X) · (Z(X) - 1)
+        //
+        //   num(X)   = Π_i (w_i(X) + β · id_i(X) + γ)
+        //   denom(X) = Π_i (w_i(X) + β · s_i(X)  + γ)
+        //
+        // Each term must vanish on H. Dividing by Z_H(X) gives t(X).
+        // ----------------------------------------------------------------
+
+        // Lift everything to the coset.
         let advice_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = advice_columns
             .iter()
             .map(|col| lift_to_coset(col, &domain))
@@ -314,6 +346,35 @@ where
             .collect();
         let e_coset = lift_to_coset(&W.E, &domain);
 
+        // Active witness columns on coset (markers + advice).
+        let active_witness_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
+            active_witness
+                .iter()
+                .map(|col| lift_to_coset(col, &domain))
+                .collect();
+
+        // Permutation polynomials on coset.
+        let s_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = perm_params
+            .s_polys
+            .iter()
+            .map(|p| lift_to_coset(p, &domain))
+            .collect();
+        let id_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = perm_params
+            .id_polys
+            .iter()
+            .map(|p| lift_to_coset(p, &domain))
+            .collect();
+
+        // Z and Z shifted on coset.
+        let z_coset = lift_to_coset(&z_evals, &domain);
+        let z_shifted_evals = shift_by_omega(&z_evals);
+        let z_shifted_coset = lift_to_coset(&z_shifted_evals, &domain);
+
+        // L_0 on coset (1 at row 0, 0 elsewhere on H).
+        let l_0_coset = lift_to_coset(&l_0_evals::<C::ScalarExt>(n), &domain);
+
+        let ext_n = domain.extended_len();
+        let rotation_step = ext_n / n;
         let all_challenges: Vec<C::ScalarExt> = U
             .challenges
             .iter()
@@ -321,11 +382,22 @@ where
             .chain(std::iter::once(U.u))
             .collect();
 
-        let ext_n = domain.extended_len();
-        let rotation_step = ext_n / n;
+        let lambda_sq = lambda.square();
 
-        let mut g_on_coset = domain.empty_extended();
-        g_on_coset.par_iter_mut().enumerate().for_each(|(i, slot)| {
+        // construct the polynomial (X - ω^{n-1}) in coefficient form,
+        // lift to the coset, and use it as a factor.
+
+        let mut factor_coeffs = vec![C::ScalarExt::ZERO; n];
+        factor_coeffs[0] = -omega.pow_vartime([(n - 1) as u64]);
+        factor_coeffs[1] = C::ScalarExt::ONE;
+
+        // Convert from Coeff to ExtendedLagrangeCoeff.
+        let factor_poly_coeff = domain.coeff_from_vec(factor_coeffs);
+        let factor_coset = domain.coeff_to_extended(factor_poly_coeff);
+
+        let mut g_combined = domain.empty_extended();
+        g_combined.par_iter_mut().enumerate().for_each(|(i, slot)| {
+            // --- Gate identity at coset row i ---
             let gate_at_i = evaluate_expression_on_coset_row(
                 gate_expr,
                 layout,
@@ -337,22 +409,38 @@ where
                 rotation_step,
                 ext_n,
             );
-            *slot = gate_at_i - e_coset[i];
+            let gate_part = gate_at_i - e_coset[i];
+
+            // --- Permutation recurrence at coset row i ---
+            let mut num = C::ScalarExt::ONE;
+            let mut denom = C::ScalarExt::ONE;
+            for k in 0..perm_params.num_active {
+                let w_at_i = active_witness_coset[k][i];
+                num *= w_at_i + beta * id_coset[k][i] + gamma;
+                denom *= w_at_i + beta * s_coset[k][i] + gamma;
+            }
+            let perm_recur = z_shifted_coset[i] * denom - z_coset[i] * num;
+            let perm_recur_with_factor = perm_recur * factor_coset[i];
+
+            // --- Permutation boundary at coset row i ---
+            let perm_boundary = l_0_coset[i] * (z_coset[i] - C::ScalarExt::ONE);
+
+            // --- Combine ---
+            *slot = gate_part + lambda * perm_recur_with_factor + lambda_sq * perm_boundary;
         });
 
-        let t_on_coset = domain.divide_by_vanishing_poly(g_on_coset);
+        // Divide by Z_H(X) and split into chunks.
+        let t_on_coset = domain.divide_by_vanishing_poly(g_combined);
         let t_coeffs = domain.extended_to_coeff(t_on_coset);
         let num_chunks = domain.get_quotient_poly_degree();
         let t_chunks_coeffs = split_into_chunks(&t_coeffs, n, num_chunks);
 
-        // convert each chunk to evaluation form *before* committing.
-        let omega = domain.get_omega();
-        let t_chunks_evals: Vec<Vec<_>> = t_chunks_coeffs
+        // Convert t-chunks to evaluation form for the unified IPA.
+        let t_chunks_evals: Vec<Vec<C::ScalarExt>> = t_chunks_coeffs
             .iter()
             .map(|chunk| coeffs_to_evals_via_fft(chunk, omega, pp.S.k as u32))
             .collect();
 
-        // CHANGED: commit the evaluation form, not the coefficient form.
         let t_commitments: Vec<C> = t_chunks_evals
             .iter()
             .map(|evals| pp.ipa_params.ck.commit(evals))
@@ -363,38 +451,24 @@ where
         }
 
         // ----------------------------------------------------------------
-        // Phase B: compute all claimed evaluations.
+        // Phase G: derive ζ and compute Lagrange bases at ζ and ζω.
         // ----------------------------------------------------------------
+        let zeta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, zeta);
+        let zeta_omega = zeta * omega;
 
+        let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, n);
+        let lagrange_at_zeta_omega = compute_lagrange_basis_at(&domain, zeta_omega, n);
+
+        // ----------------------------------------------------------------
+        // Phase H: compute all claimed evaluations.
+        // ----------------------------------------------------------------
         let queries = collect_queries(gate_expr);
 
-        // Commit each column using the slice of generators that corresponds
-        // to its position in the stacked layout.
-        let advice_commitments_per_column: Vec<C> = advice_columns
-            .iter()
-            .enumerate()
-            .map(|(col_idx, col_evals)| {
-                let gen_start = col_idx * n;
-                let gen_end = gen_start + n;
-                let generators_slice = &pp.ipa_params.ck[gen_start..gen_end];
-                best_multiexp(col_evals, generators_slice).to_affine()
-            })
-            .collect();
-        for c in &advice_commitments_per_column {
-            transcript.absorb_point(c);
-        }
-
-        // ----------------------------------------------------------------
-        // Phase C: derive ζ and compute related evaluations.
-        // ----------------------------------------------------------------
-
-        let zeta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
-        let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, n);
-
-        // Evaluate at ζ in lagrange form
-        let query_evals: Vec<_> = queries
+        let query_evals: Vec<C::ScalarExt> = queries
             .iter()
             .map(|q| {
+                debug_assert_eq!(q.rotation.0, 0);
                 let evals = match layout.resolve(q.index) {
                     ResolvedQuery::Advice(i) => &advice_columns[i],
                     ResolvedQuery::Fixed(i) => &pp.S.fixed_columns[i],
@@ -405,13 +479,28 @@ where
             .collect();
 
         let e_eval = eval_lagrange_at(&W.E, &lagrange_at_zeta);
+
         let t_chunks_eval: Vec<C::ScalarExt> = t_chunks_evals
             .iter()
             .map(|evals| eval_lagrange_at(evals, &lagrange_at_zeta))
             .collect();
 
-        // Absorb evaluations.  Each is a scalar, absorbed via the
-        // scalar-to-base helper.
+        // Permutation-related evaluations.
+        let z_at_zeta = eval_lagrange_at(&z_evals, &lagrange_at_zeta);
+        let z_at_zeta_omega = eval_lagrange_at(&z_evals, &lagrange_at_zeta_omega);
+
+        let s_at_zeta: Vec<C::ScalarExt> = perm_params
+            .s_polys
+            .iter()
+            .map(|p| eval_lagrange_at(p, &lagrange_at_zeta))
+            .collect();
+        let id_at_zeta: Vec<C::ScalarExt> = perm_params
+            .id_polys
+            .iter()
+            .map(|p| eval_lagrange_at(p, &lagrange_at_zeta))
+            .collect();
+
+        // Absorb all evaluations into transcript.
         for e in &query_evals {
             absorb_scalar_as_base::<C, _>(transcript, *e);
         }
@@ -419,23 +508,32 @@ where
         for e in &t_chunks_eval {
             absorb_scalar_as_base::<C, _>(transcript, *e);
         }
+        absorb_scalar_as_base::<C, _>(transcript, z_at_zeta);
+        absorb_scalar_as_base::<C, _>(transcript, z_at_zeta_omega);
+        for e in &s_at_zeta {
+            absorb_scalar_as_base::<C, _>(transcript, *e);
+        }
+        for e in &id_at_zeta {
+            absorb_scalar_as_base::<C, _>(transcript, *e);
+        }
 
         // ----------------------------------------------------------------
-        // Phase D: combine and open via IPA.
+        // Phase I: main IPA at ζ.
+        //
+        // All polynomials except shifted-Z open at ζ:
+        //   - advice columns (per-column, with offsets)
+        //   - fixed columns
+        //   - selector columns
+        //   - E
+        //   - t-chunks
+        //   - Z (at ζ)
+        //   - s_i for each active column
+        //   - id_i for each active column
         // ----------------------------------------------------------------
-
-        // Squeeze the batching challenge α.
         let alpha: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, alpha);
 
-        // Convert t_chunks to evaluation form for unified IPA
-        let omega = domain.get_omega();
-        let t_chunks_evals: Vec<Vec<_>> = t_chunks_coeffs
-            .iter()
-            .map(|chunk| coeffs_to_evals_via_fft(chunk, omega, pp.S.k as u32))
-            .collect();
-
-        // Gather openings using evaluation form throughout
-        let openings = gather_openings_for_prover(
+        let openings = gather_openings_with_permutation(
             &queries,
             layout,
             &advice_columns,
@@ -448,37 +546,65 @@ where
             &U.E_commitment,
             &t_chunks_evals,
             &t_commitments,
+            &z_evals,
+            &z_commitment,
+            &perm_params.s_polys,
+            &perm_params.s_commitments,
+            &perm_params.id_polys,
+            &perm_params.id_commitments,
             &query_evals,
             e_eval,
             &t_chunks_eval,
+            z_at_zeta,
+            &s_at_zeta,
+            &id_at_zeta,
             n,
         );
 
-        // Combine: f_coeffs = Σ α^i · p_i(X)
         let total_len = pp.ipa_params.ck.len();
         let f_embedded = combine_evals_embedded(&openings, alpha, total_len);
-        let mut b_embedded = Vec::with_capacity(total_len);
+
+        // b_embedded: tile lagrange_at_zeta across the full generator range.
         let num_blocks = total_len / n;
+        let mut b_embedded = Vec::with_capacity(total_len);
         for _ in 0..num_blocks {
             b_embedded.extend_from_slice(&lagrange_at_zeta);
         }
-        debug_assert_eq!(b_embedded.len(), total_len);
 
-        // Run IPA on (f, ζ).
-        // The IPA prover doesn't need C_f or v_f as inputs — it just commits
-        // to the polynomial f and proves the inner product.  The verifier
-        // will reconstruct C_f from public data and check.
         let opening_proof = ipa_prove_single(&pp.ipa_params, &f_embedded, &b_embedded, transcript);
+
+        // ----------------------------------------------------------------
+        // Phase J: separate IPA for Z at ζω.
+        //
+        // Z is the only polynomial that opens at a shifted point.
+        // We prove it separately to keep the main IPA's b vector uniform.
+        // ----------------------------------------------------------------
+        let mut z_embedded = vec![C::ScalarExt::ZERO; total_len];
+        z_embedded[..n].copy_from_slice(&z_evals);
+
+        let mut b_embedded_zw = Vec::with_capacity(total_len);
+        for _ in 0..num_blocks {
+            b_embedded_zw.extend_from_slice(&lagrange_at_zeta_omega);
+        }
+
+        let opening_proof_zw =
+            ipa_prove_single(&pp.ipa_params, &z_embedded, &b_embedded_zw, transcript);
 
         Ok(GateDeciderProof {
             t_commitments,
             advice_column_commitments: advice_commitments_per_column,
+            z_commitment,
             evals: GateEvaluations {
                 queries: query_evals,
                 e_eval,
                 t_chunks: t_chunks_eval,
+                z_at_zeta,
+                z_at_zeta_omega,
+                s_at_zeta,
+                id_at_zeta,
             },
             opening_proof,
+            opening_proof_zw,
         })
     }
 
@@ -486,17 +612,10 @@ where
     // Verifier side
     // =================================================================
 
-    /// Verify the gate-identity portion of a decider proof.
-    ///
-    /// Replaces `is_sat_accumulation` with a constant-work check:
-    ///   1. Symbolic evaluation of the gate expression at ζ using the
-    ///      prover's claimed evaluations.
-    ///   2. Quotient relation: gate_hom(ζ) - E(ζ) == Z_H(ζ) · t(ζ).
-    ///   3. IPA batch opening verification tying the claimed evaluations
-    ///      to column commitments, U.E_commitment, and proof.t_commitments
-    ///      (plus the preprocessed fixed/selector commitments in vp).
+    /// Verify the gate-identity and permutation portions of a decider proof.
     pub fn verify_decider_gate_part(
         vp: &GateDeciderVerifierParam<C>,
+        perm_params: &PermutationParams<C>,
         U: &RelaxedPlonkInstance<C, MARKERS_LEN>,
         proof: &GateDeciderProof<C>,
         transcript: &mut impl ROTrait<C::Base>,
@@ -504,6 +623,12 @@ where
         let n = 1usize << vp.k;
         let n_u64 = n as u64;
 
+        // ----------------------------------------------------------------
+        // Step 1: reconstruction check on advice commitments.
+        //
+        // The per-column commitments in the proof must sum to U.W_commitments[0],
+        // binding the proof to the folded accumulator.
+        // ----------------------------------------------------------------
         let expected_num_chunks = vp.gate_degree.saturating_sub(1).max(1);
         if proof.evals.t_chunks.len() != expected_num_chunks
             || proof.t_commitments.len() != expected_num_chunks
@@ -511,41 +636,54 @@ where
             return Err(VerifyError::ProofShapeMismatch);
         }
 
-        // consistency of column commitments against W
-        let reconstructed_round_commitment: C = proof
+        let reconstructed: C = proof
             .advice_column_commitments
             .iter()
-            .map(|c| c.to_curve())
-            .fold(C::Curve::identity(), |acc, c| acc + c)
+            .fold(C::CurveExt::identity(), |acc, c| acc + c.to_curve())
             .to_affine();
 
-        if reconstructed_round_commitment != U.W_commitments[0] {
+        if U.W_commitments.len() != 1 || reconstructed != U.W_commitments[0] {
             return Err(VerifyError::OpeningFailed {
-                error: "Reconstructed round commitment does not match U.W_commitments[0]".into(),
+                error: "round commitment reconstruction mismatch".into(),
             });
         }
 
+        // ----------------------------------------------------------------
+        // Step 2: mirror the prover's transcript exactly.
+        // ----------------------------------------------------------------
         transcript.absorb(U);
-
-        // Re-derive ζ from the transcript (mirroring the prover).
-        for c in &proof.t_commitments {
-            transcript.absorb_point(c);
-        }
 
         for c in &proof.advice_column_commitments {
             transcript.absorb_point(c);
         }
 
+        let beta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, beta);
+        let gamma: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, gamma);
+
+        transcript.absorb_point(&proof.z_commitment);
+
+        let lambda: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, lambda);
+        let lambda_sq = lambda.square();
+
+        for c in &proof.t_commitments {
+            transcript.absorb_point(c);
+        }
+
         let zeta: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
-        let domain = EvaluationDomain::<C::ScalarExt>::new(vp.gate_degree as u32, vp.k as u32);
-        let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, 1 << vp.k);
+        absorb_scalar_as_base::<C, _>(transcript, zeta);
+        let zeta_omega = zeta * vp.omega;
+
+        // Build a verifier-side domain for Lagrange basis computation.
+        // j=1 is sufficient — we only need iFFT-related machinery.
+        let domain = EvaluationDomain::<C::ScalarExt>::new(1, vp.k as u32);
+        let lagrange_at_zeta = compute_lagrange_basis_at(&domain, zeta, n);
+        let lagrange_at_zeta_omega = compute_lagrange_basis_at(&domain, zeta_omega, n);
 
         // ----------------------------------------------------------------
-        // Step 1: symbolic gate-identity check at ζ.
-        //
-        // Verifier reconstructs gate_hom(W(ζ), u, ...) using the prover's
-        // claimed evaluations, subtracts E(ζ), and checks against
-        // Z_H(ζ) · t(ζ).
+        // Step 3: gate identity at ζ.
         // ----------------------------------------------------------------
         let queries = collect_queries(&vp.gate_expression);
         if queries.len() != proof.evals.queries.len() {
@@ -568,20 +706,87 @@ where
         let gate_at_zeta =
             evaluate_expression_symbolic(&vp.gate_expression, &query_eval_pairs, &all_challenges);
 
+        // ----------------------------------------------------------------
+        // Step 4: permutation identity at ζ.
+        //
+        // Reconstruct the values of active columns at ζ:
+        //   - Active column 0: markers polynomial, evaluated by verifier
+        //     directly from U.consistency_markers (no commitment needed).
+        //   - Active columns 1..num_active: advice columns, extracted
+        //     from proof.evals.queries by matching the Query layout.
+        // ----------------------------------------------------------------
+        let mut markers_poly = vec![C::ScalarExt::ZERO; n];
+        for (j, m) in U.consistency_markers.iter().enumerate() {
+            markers_poly[j] = *m;
+        }
+        let markers_at_zeta = eval_lagrange_at(&markers_poly, &lagrange_at_zeta);
+
+        let mut w_active_at_zeta = Vec::with_capacity(perm_params.num_active);
+        w_active_at_zeta.push(markers_at_zeta);
+
+        for col_idx in 0..vp.query_layout.num_advice {
+            let q_idx = queries.iter().position(|q| {
+                matches!(
+                    vp.query_layout.resolve(q.index),
+                    ResolvedQuery::Advice(c) if c == col_idx
+                ) && q.rotation.0 == 0
+            });
+            match q_idx {
+                Some(idx) => w_active_at_zeta.push(proof.evals.queries[idx]),
+                None => {
+                    // Advice column doesn't appear in the gate at rotation 0.
+                    // For the current implementation we require it to.
+                    return Err(VerifyError::ProofShapeMismatch);
+                }
+            }
+        }
+        debug_assert_eq!(w_active_at_zeta.len(), perm_params.num_active);
+
+        // Sanity-check that the proof's s_at_zeta and id_at_zeta have the
+        // right shape.
+        if proof.evals.s_at_zeta.len() != perm_params.num_active
+            || proof.evals.id_at_zeta.len() != perm_params.num_active
+        {
+            return Err(VerifyError::ProofShapeMismatch);
+        }
+
+        // Compute the recurrence at ζ.
+        let mut num_at_zeta = C::ScalarExt::ONE;
+        let mut denom_at_zeta = C::ScalarExt::ONE;
+        for i in 0..perm_params.num_active {
+            num_at_zeta *= w_active_at_zeta[i] + beta * proof.evals.id_at_zeta[i] + gamma;
+            denom_at_zeta *= w_active_at_zeta[i] + beta * proof.evals.s_at_zeta[i] + gamma;
+        }
+
+        let perm_recur_at_zeta =
+            proof.evals.z_at_zeta_omega * denom_at_zeta - proof.evals.z_at_zeta * num_at_zeta;
+
+        // Boundary at ζ: L_0(ζ) · (Z(ζ) - 1).
+        let l_0_at_zeta = lagrange_at_zeta[0];
+        let perm_boundary_at_zeta = l_0_at_zeta * (proof.evals.z_at_zeta - C::ScalarExt::ONE);
+
+        // ----------------------------------------------------------------
+        // Step 5: combined identity check.
+        //
+        //   (gate_at_zeta - e_eval) + λ · perm_recur + λ² · perm_boundary
+        //     ==  Z_H(ζ) · t(ζ)
+        // ----------------------------------------------------------------
+        let zeta_minus_omega_n_minus_1 = zeta - vp.omega.pow_vartime([(n - 1) as u64]);
+        let combined_lhs = (gate_at_zeta - proof.evals.e_eval)
+            + lambda * perm_recur_at_zeta * zeta_minus_omega_n_minus_1
+            + lambda_sq * perm_boundary_at_zeta;
+
         let z_h_at_zeta = zeta.pow_vartime([n_u64]) - C::ScalarExt::ONE;
         let t_at_zeta = combine_quotient_chunks(&proof.evals.t_chunks, zeta, n_u64);
+        let combined_rhs = z_h_at_zeta * t_at_zeta;
 
-        let lhs = gate_at_zeta - proof.evals.e_eval;
-        let rhs = z_h_at_zeta * t_at_zeta;
-
-        if lhs != rhs {
+        if combined_lhs != combined_rhs {
             return Err(VerifyError::GateIdentityMismatch);
         }
 
         // ----------------------------------------------------------------
-        // Step 2: re-derive α (the batching challenge for the IPA).
+        // Step 6: absorb evaluations and derive α (mirroring prover).
         // ----------------------------------------------------------------
-
         for e in &proof.evals.queries {
             absorb_scalar_as_base::<C, _>(transcript, *e);
         }
@@ -589,24 +794,22 @@ where
         for e in &proof.evals.t_chunks {
             absorb_scalar_as_base::<C, _>(transcript, *e);
         }
+        absorb_scalar_as_base::<C, _>(transcript, proof.evals.z_at_zeta);
+        absorb_scalar_as_base::<C, _>(transcript, proof.evals.z_at_zeta_omega);
+        for e in &proof.evals.s_at_zeta {
+            absorb_scalar_as_base::<C, _>(transcript, *e);
+        }
+        for e in &proof.evals.id_at_zeta {
+            absorb_scalar_as_base::<C, _>(transcript, *e);
+        }
 
         let alpha: C::ScalarExt = transcript.squeeze(NUM_CHALLENGE_BITS);
+        absorb_scalar_as_base::<C, _>(transcript, alpha);
 
         // ----------------------------------------------------------------
-        // Step 3: combine commitments and evaluations.
-        //
-        // Verifier knows:
-        //   - column_commitments
-        //   - vp.fixed_commitments
-        //   - vp.selector_commitments
-        //   - U.E_commitment
-        //   - proof.t_commitments
-        //
-        // For each query (in the same order as the prover), resolve to a
-        // commitment.  Then compute C_f = Σ α^i · C_i and v_f = Σ α^i · v_i.
+        // Step 7: combine commitments and evaluations for the main IPA.
         // ----------------------------------------------------------------
-
-        let commitments_in_order = gather_commitments_for_verifier(
+        let commitments_in_order = gather_commitments_with_permutation(
             &queries,
             &vp.query_layout,
             &proof.advice_column_commitments,
@@ -614,6 +817,9 @@ where
             &vp.selector_commitments,
             &U.E_commitment,
             &proof.t_commitments,
+            &proof.z_commitment,
+            &perm_params.s_commitments,
+            &perm_params.id_commitments,
         );
 
         let evals_in_order: Vec<C::ScalarExt> = proof
@@ -623,20 +829,22 @@ where
             .copied()
             .chain(std::iter::once(proof.evals.e_eval))
             .chain(proof.evals.t_chunks.iter().copied())
+            .chain(std::iter::once(proof.evals.z_at_zeta))
+            .chain(proof.evals.s_at_zeta.iter().copied())
+            .chain(proof.evals.id_at_zeta.iter().copied())
             .collect();
 
         debug_assert_eq!(commitments_in_order.len(), evals_in_order.len());
 
-        // Compute C_f and v_f via Horner-style accumulation with α.
         let (c_combined, v_combined) =
             combine_for_ipa(&commitments_in_order, &evals_in_order, alpha);
 
         // ----------------------------------------------------------------
-        // Step 4: verify the IPA opening of (c_combined, v_combined) at ζ.
+        // Step 8: verify the main IPA at ζ.
         // ----------------------------------------------------------------
         let total_len = vp.ipa_params.ck.len();
-        let mut b_embedded = Vec::with_capacity(total_len);
         let num_blocks = total_len / n;
+        let mut b_embedded = Vec::with_capacity(total_len);
         for _ in 0..num_blocks {
             b_embedded.extend_from_slice(&lagrange_at_zeta);
         }
@@ -647,6 +855,23 @@ where
             v_combined,
             &b_embedded,
             &proof.opening_proof,
+            transcript,
+        )?;
+
+        // ----------------------------------------------------------------
+        // Step 9: verify the separate IPA for Z at ζω.
+        // ----------------------------------------------------------------
+        let mut b_embedded_zw = Vec::with_capacity(total_len);
+        for _ in 0..num_blocks {
+            b_embedded_zw.extend_from_slice(&lagrange_at_zeta_omega);
+        }
+
+        ipa_verify_single(
+            &vp.ipa_params,
+            proof.z_commitment,
+            proof.evals.z_at_zeta_omega,
+            &b_embedded_zw,
+            &proof.opening_proof_zw,
             transcript,
         )?;
 
@@ -1201,4 +1426,94 @@ pub fn coeffs_to_evals_via_fft<F: PrimeField>(coeffs: &[F], omega: F, k: u32) ->
     let mut evals = coeffs.to_vec();
     best_fft(&mut evals, omega, k);
     evals
+}
+
+// Build a function that evaluates expr at H row j, NOT coset.
+fn eval_expr_at_H_row<F: PrimeField>(
+    expr: &Expression<F>,
+    layout: &QueryLayout,
+    row: usize,
+    advice_evals_on_H: &[Vec<F>],
+    fixed_evals_on_H: &[Vec<F>],
+    selector_evals_on_H: &[Vec<F>],
+    challenges: &[F],
+    n: usize,
+) -> F {
+    match expr {
+        Expression::Constant(c) => *c,
+        Expression::Challenge(i) => challenges[*i],
+        Expression::Polynomial(q) => {
+            // Rotation r on H: row (r + row) mod n.
+            let r = ((row as i64 + q.rotation.0 as i64).rem_euclid(n as i64)) as usize;
+            match layout.resolve(q.index) {
+                ResolvedQuery::Advice(i) => advice_evals_on_H[i][r],
+                ResolvedQuery::Fixed(i) => fixed_evals_on_H[i][r],
+                ResolvedQuery::Selector(i) => selector_evals_on_H[i][r],
+            }
+        }
+        Expression::Negated(inner) => -eval_expr_at_H_row(
+            inner,
+            layout,
+            row,
+            advice_evals_on_H,
+            fixed_evals_on_H,
+            selector_evals_on_H,
+            challenges,
+            n,
+        ),
+        Expression::Sum(a, b) => {
+            eval_expr_at_H_row(
+                a,
+                layout,
+                row,
+                advice_evals_on_H,
+                fixed_evals_on_H,
+                selector_evals_on_H,
+                challenges,
+                n,
+            ) + eval_expr_at_H_row(
+                b,
+                layout,
+                row,
+                advice_evals_on_H,
+                fixed_evals_on_H,
+                selector_evals_on_H,
+                challenges,
+                n,
+            )
+        }
+        Expression::Product(a, b) => {
+            eval_expr_at_H_row(
+                a,
+                layout,
+                row,
+                advice_evals_on_H,
+                fixed_evals_on_H,
+                selector_evals_on_H,
+                challenges,
+                n,
+            ) * eval_expr_at_H_row(
+                b,
+                layout,
+                row,
+                advice_evals_on_H,
+                fixed_evals_on_H,
+                selector_evals_on_H,
+                challenges,
+                n,
+            )
+        }
+        Expression::Scaled(inner, s) => {
+            eval_expr_at_H_row(
+                inner,
+                layout,
+                row,
+                advice_evals_on_H,
+                fixed_evals_on_H,
+                selector_evals_on_H,
+                challenges,
+                n,
+            ) * s
+        }
+    }
 }
