@@ -6,7 +6,7 @@ use crate::fft::best_fft;
 use crate::nifs::sangria::ipa::{ipa_prove_single, ipa_verify_single, IpaParams, IpaProof};
 use crate::nifs::sangria::permutation::{
     build_permutation_grand_product, build_permutation_params, gather_commitments_with_permutation,
-    gather_openings_with_permutation, l_0_evals, shift_by_omega, PermutationParams,
+    gather_openings_with_permutation, l_0_evals, PermutationParams,
 };
 use crate::{
     commitment::CommitmentKey,
@@ -78,6 +78,7 @@ pub struct GateDeciderProverParam<C: CurveAffine> {
     pub S: PlonkStructure<C::ScalarExt>,
     pub pp_digest: (C::Base, C::Base),
     pub fixed_commitments: Vec<C>,
+    pub fixed_columns_coset: Arc<Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
     pub selector_commitments: Vec<C>,
     pub ipa_params: IpaParams<C>,
     pub perm_params: PermutationParams<C>,
@@ -145,6 +146,11 @@ where
         .iter()
         .map(|col| ck.commit(col))
         .collect::<Result<_, _>>()?;
+    let fixed_columns_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = S
+        .fixed_columns
+        .iter()
+        .map(|col| lift_to_coset(col, &EvaluationDomain::new(S.k as u32, S.k as u32)))
+        .collect();
 
     let selector_commitments: Vec<C> = S
         .selectors
@@ -171,12 +177,13 @@ where
 
     // build permutation preprocessing.
     let perm_params =
-        build_permutation_params::<C, MARKERS_LEN>(&S, ck, omega, S.num_advice_columns)?;
+        build_permutation_params::<C, MARKERS_LEN>(&S, ck, omega, &domain, S.num_advice_columns)?;
 
     let pp = GateDeciderProverParam {
         S,
         pp_digest: pp_digest_xy,
         fixed_commitments: fixed_commitments.clone(),
+        fixed_columns_coset: fixed_columns_coset.into(),
         selector_commitments: selector_commitments.clone(),
         ipa_params: ipa_params.clone(),
         perm_params: perm_params.clone(),
@@ -216,6 +223,8 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<GateDeciderProof<C>, Error> {
+        let prover_start = std::time::Instant::now();
+
         let RelaxedPlonkTrace { U, W } = acc;
         let n = 1usize << pp.S.k;
         let gate_expr = pp.S.custom_gates_lookup_compressed.homogeneous();
@@ -286,15 +295,16 @@ where
             markers_poly[j] = *m;
         }
 
-        let mut active_witness: Vec<Vec<C::ScalarExt>> = Vec::with_capacity(perm_params.num_active);
-        active_witness.push(markers_poly.clone());
+        let mut active_witness_refs: Vec<&[C::ScalarExt]> =
+            Vec::with_capacity(perm_params.num_active);
+        active_witness_refs.push(&markers_poly);
         for col_idx in 0..pp.S.num_advice_columns {
-            active_witness.push(advice_columns[col_idx].clone());
+            active_witness_refs.push(&advice_columns[col_idx]);
         }
-        debug_assert_eq!(active_witness.len(), perm_params.num_active);
+        debug_assert_eq!(active_witness_refs.len(), perm_params.num_active);
 
         let z_evals = build_permutation_grand_product(
-            &active_witness,
+            &active_witness_refs,
             &perm_params.id_polys,
             &perm_params.s_polys,
             beta,
@@ -335,40 +345,32 @@ where
             .iter()
             .map(|col| lift_to_coset(col, &domain))
             .collect();
-        let fixed_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
-            pp.S.fixed_columns
-                .iter()
-                .map(|col| lift_to_coset(col, &domain))
-                .collect();
+        let fixed_coset: &Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
+            &pp.fixed_columns_coset;
         let selector_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = selector_field
             .iter()
             .map(|sel| lift_to_coset(sel, &domain))
             .collect();
         let e_coset = lift_to_coset(&W.E, &domain);
 
-        // Active witness columns on coset (markers + advice).
-        let active_witness_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
-            active_witness
-                .iter()
-                .map(|col| lift_to_coset(col, &domain))
-                .collect();
+        // Lift markers once.
+        let markers_coset = lift_to_coset(&markers_poly, &domain);
+        let active_witness_coset = |k: usize, i: usize| {
+            if k == 0 {
+                markers_coset[i]
+            } else {
+                advice_coset[k - 1][i]
+            }
+        };
 
         // Permutation polynomials on coset.
-        let s_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = perm_params
-            .s_polys
-            .iter()
-            .map(|p| lift_to_coset(p, &domain))
-            .collect();
-        let id_coset: Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = perm_params
-            .id_polys
-            .iter()
-            .map(|p| lift_to_coset(p, &domain))
-            .collect();
+        let s_coset: &Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
+            &perm_params.s_polys_coset;
+        let id_coset: &Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> =
+            &perm_params.id_polys_coset;
 
         // Z and Z shifted on coset.
         let z_coset = lift_to_coset(&z_evals, &domain);
-        let z_shifted_evals = shift_by_omega(&z_evals);
-        let z_shifted_coset = lift_to_coset(&z_shifted_evals, &domain);
 
         // L_0 on coset (1 at row 0, 0 elsewhere on H).
         let l_0_coset = lift_to_coset(&l_0_evals::<C::ScalarExt>(n), &domain);
@@ -415,11 +417,12 @@ where
             let mut num = C::ScalarExt::ONE;
             let mut denom = C::ScalarExt::ONE;
             for k in 0..perm_params.num_active {
-                let w_at_i = active_witness_coset[k][i];
+                let w_at_i = active_witness_coset(k, i);
                 num *= w_at_i + beta * id_coset[k][i] + gamma;
                 denom *= w_at_i + beta * s_coset[k][i] + gamma;
             }
-            let perm_recur = z_shifted_coset[i] * denom - z_coset[i] * num;
+            let z_shifted_coset = |i: usize| z_coset[(i + rotation_step) % ext_n];
+            let perm_recur = z_shifted_coset(i) * denom - z_coset[i] * num;
             let perm_recur_with_factor = perm_recur * factor_coset[i];
 
             // --- Permutation boundary at coset row i ---
@@ -589,6 +592,12 @@ where
 
         let opening_proof_zw =
             ipa_prove_single(&pp.ipa_params, &z_embedded, &b_embedded_zw, transcript);
+
+        let prover_elapsed = prover_start.elapsed();
+        println!(
+            "Prover time for gate decider: {} s",
+            prover_elapsed.as_millis() / 1000
+        );
 
         Ok(GateDeciderProof {
             t_commitments,

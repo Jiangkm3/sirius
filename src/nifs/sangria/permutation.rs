@@ -8,15 +8,15 @@ use halo2_proofs::{
     arithmetic::{CurveAffine, Field},
     halo2curves::ff::PrimeField,
     plonk::Any,
+    poly::{EvaluationDomain, ExtendedLagrangeCoeff, Polynomial},
 };
 
 use crate::{
     commitment::CommitmentKey,
     nifs::sangria::{
-        decider::{OpeningEntry, ResolvedQuery},
-        Error, QueryLayout,
+        Error, QueryLayout, decider::{OpeningEntry, ResolvedQuery, lift_to_coset}
     },
-    plonk::{permutation::PermutationData, PlonkStructure},
+    plonk::{PlonkStructure, permutation::PermutationData},
     polynomial::Query,
 };
 
@@ -117,6 +117,8 @@ fn permutation_delta<F: PrimeField>() -> F {
 pub struct PermutationParams<C: CurveAffine> {
     pub s_polys: Arc<Vec<Vec<C::ScalarExt>>>,
     pub id_polys: Arc<Vec<Vec<C::ScalarExt>>>,
+    pub s_polys_coset: Arc<Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
+    pub id_polys_coset: Arc<Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
     pub s_commitments: Vec<C>,
     pub id_commitments: Vec<C>,
     pub num_active: usize,
@@ -127,6 +129,8 @@ impl<C: CurveAffine> Clone for PermutationParams<C> {
         Self {
             s_polys: Arc::clone(&self.s_polys),
             id_polys: Arc::clone(&self.id_polys),
+            s_polys_coset: Arc::clone(&self.s_polys_coset),
+            id_polys_coset: Arc::clone(&self.id_polys_coset),
             s_commitments: self.s_commitments.clone(),
             id_commitments: self.id_commitments.clone(),
             num_active: self.num_active,
@@ -142,6 +146,7 @@ pub fn build_permutation_params<C: CurveAffine, const MARKERS_LEN: usize>(
     S: &PlonkStructure<C::ScalarExt>,
     ck: &CommitmentKey<C>,
     omega: C::ScalarExt,
+    domain: &EvaluationDomain<C::ScalarExt>,
     num_advice: usize,
 ) -> Result<PermutationParams<C>, Error>
 where
@@ -199,11 +204,17 @@ where
         .map(|p| ck.commit(p))
         .collect::<Result<_, _>>()?;
 
+    // Convert to coset form.
+    let s_polys_coset: Vec<_> = s_polys.iter().map(|p| lift_to_coset(p, &domain)).collect();
+    let id_polys_coset: Vec<_> = id_polys.iter().map(|p| lift_to_coset(p, &domain)).collect();
+
     Ok(PermutationParams {
         s_polys: s_polys.into(),
         id_polys: id_polys.into(),
         s_commitments,
         id_commitments,
+        s_polys_coset: s_polys_coset.into(),
+        id_polys_coset: id_polys_coset.into(),
         num_active,
     })
 }
@@ -223,7 +234,7 @@ where
 ///
 /// Uses batch inversion to compute all the denom_j^{-1} efficiently.
 pub fn build_permutation_grand_product<F: PrimeField>(
-    permuted_witness: &[Vec<F>], // length = permuted_columns.len(), each of length n
+    permuted_witness: &[&[F]], // length = permuted_columns.len(), each of length n
     id_polys: &[Vec<F>],
     s_polys: &[Vec<F>],
     beta: F,
@@ -298,22 +309,6 @@ fn batch_invert_field<F: PrimeField>(mut vals: Vec<F>) -> Vec<F> {
         vals[i] = val_inv;
     }
     vals
-}
-
-// =====================================================================
-// Compute Z(ω · X) shifted polynomial in evaluation form
-// =====================================================================
-
-/// Given Z(ω^j) for j in [0, n), produce Z_shifted(ω^j) = Z(ω^{j+1}).
-///
-/// In evaluation form, this is just a cyclic shift of the evaluations.
-pub fn shift_by_omega<F: Clone>(z_evals: &[F]) -> Vec<F> {
-    let n = z_evals.len();
-    let mut shifted = Vec::with_capacity(n);
-    for j in 0..n {
-        shifted.push(z_evals[(j + 1) % n].clone());
-    }
-    shifted
 }
 
 // =====================================================================
