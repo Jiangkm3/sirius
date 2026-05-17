@@ -80,22 +80,43 @@ where
     RO: ROTrait<C::Base>,
     C::Base: FromUniformBytes<64>,
 {
-    let n = a.len();
+    ipa_prove_single_with_generators(
+        &params.ck[..],
+        &params.aux,
+        a,
+        b,
+        transcript,
+    )
+}
+
+// Core implementation that takes generators explicitly.
+pub fn ipa_prove_single_with_generators<C: CurveAffine>(
+    generators: &[C],       // length L (any power of 2)
+    aux: &C,                // auxiliary generator for v · H
+    f: &[C::ScalarExt],     // length L
+    b: &[C::ScalarExt],     // length L
+    transcript: &mut impl ROTrait<C::Base>,
+) -> IpaProof<C>
+where
+    C::Base: FromUniformBytes<64>,
+{
+    debug_assert_eq!(f.len(), b.len());
+    debug_assert_eq!(f.len(), generators.len());
+    debug_assert!(f.len().is_power_of_two());
+    let n = f.len();
     assert!(n.is_power_of_two(), "IPA requires power-of-2 length");
-    assert!(n <= params.ck.len(), "polynomial longer than generators");
+    assert!(n <= generators.len(), "polynomial longer than generators");
 
     let k = n.trailing_zeros() as usize;
 
     // Working state — gets halved each round.
-    let mut a: Vec<C::ScalarExt> = a.to_vec();
+    let mut a: Vec<C::ScalarExt> = f.to_vec();
     let mut b: Vec<C::ScalarExt> = b.to_vec();
-    let mut g: Vec<C> = params.ck[..n].to_vec();
+    let mut g: Vec<C> = generators[..n].to_vec();
 
     let mut rounds = Vec::with_capacity(k);
 
     for _round in 0..k {
-        let round_start = std::time::Instant::now();
-
         let half = a.len() / 2;
         let (a_L, a_R) = a.split_at(half);
         let (b_L, b_R) = b.split_at(half);
@@ -103,11 +124,11 @@ where
 
         // L = <a_L, G_R> + <a_L, b_R> · U
         let inner_LR = inner_product(a_L, b_R);
-        let l_point = msm_with_aux(a_L, g_R, &params.aux, inner_LR);
+        let l_point = msm_with_aux(a_L, g_R, aux, inner_LR);
 
         // R = <a_R, G_L> + <a_R, b_L> · U
         let inner_RL = inner_product(a_R, b_L);
-        let r_point = msm_with_aux(a_R, g_L, &params.aux, inner_RL);
+        let r_point = msm_with_aux(a_R, g_L, aux, inner_RL);
 
         // Absorb L and R into the transcript.
         transcript.absorb_point(&l_point);
@@ -150,9 +171,6 @@ where
         a = new_a;
         b = new_b;
         g = new_g;
-
-        let round_elapsed = round_start.elapsed();
-        println!("ROUND {}, elapsed: {} ms", _round, round_elapsed.as_millis());
     }
 
     debug_assert_eq!(a.len(), 1);
@@ -176,7 +194,7 @@ where
 pub fn ipa_verify_single<C: CurveAffine, RO>(
     params: &IpaParams<C>,
     commitment: C,
-    claimed_eval: C::ScalarExt,
+    expected_v: C::ScalarExt,
     b: &[C::Scalar], // the basis vector evaluated at the point
     proof: &IpaProof<C>,
     transcript: &mut RO,
@@ -185,11 +203,36 @@ where
     RO: ROTrait<C::Base>,
     C::Base: FromUniformBytes<64>,
 {
+    ipa_verify_single_with_generators(
+        &params.ck[..],
+        &params.aux,
+        commitment,
+        expected_v,
+        b,
+        proof,
+        transcript,
+    )
+}
+
+pub fn ipa_verify_single_with_generators<C: CurveAffine>(
+    generators: &[C],
+    aux: &C,
+    commitment: C,
+    expected_v: C::ScalarExt,
+    b: &[C::ScalarExt],
+    proof: &IpaProof<C>,
+    transcript: &mut impl ROTrait<C::Base>,
+) -> Result<(), VerifyError>
+where
+    C::Base: FromUniformBytes<64>,
+{
+    debug_assert_eq!(b.len(), generators.len());
+    debug_assert!(b.len().is_power_of_two());
     let k = proof.rounds.len();
     let n = 1 << k;
 
     // Modified commitment: C' = C + v · U
-    let mut c_prime = (commitment.to_curve() + params.aux.to_curve() * claimed_eval).to_affine();
+    let mut c_prime = (commitment.to_curve() + aux.to_curve() * expected_v).to_affine();
 
     // Collect challenges, mirroring the prover's transcript.
     let mut challenges = Vec::with_capacity(k);
@@ -215,7 +258,7 @@ where
     //
     // This is the O(n) MSM.  See "compute_s" below.
     let s = compute_s(&challenges, &challenges_inv, n);
-    let g_final = best_multiexp(&s, &params.ck[..n]).to_affine();
+    let g_final = best_multiexp(&s, &generators[..n]).to_affine();
 
     // Reconstruct b_final = <s, [1, ζ, ζ², ...]>
     // This can be done in O(log n) via a closed form, see below.
@@ -223,7 +266,7 @@ where
 
     // Final check: C' == a_final · G_final + (a_final · b_final) · U
     let expected = (g_final.to_curve() * proof.a_final
-        + params.aux.to_curve() * (proof.a_final * b_final))
+        + aux.to_curve() * (proof.a_final * b_final))
         .to_affine();
 
     if c_prime == expected {
@@ -463,7 +506,7 @@ mod tests {
 
         // Compute commitment and claimed eval.
         let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
-        let claimed_eval: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
+        let expected_v: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
 
         // Prove.
         let mut prover_transcript = fresh_transcript();
@@ -474,7 +517,7 @@ mod tests {
         let result = ipa_verify_single(
             &params,
             commitment,
-            claimed_eval,
+            expected_v,
             &b,
             &proof,
             &mut verifier_transcript,
@@ -498,7 +541,7 @@ mod tests {
         let b: Vec<Fr> = lagrange_basis_at(zeta, n, omega);
 
         let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
-        let claimed_eval: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
+        let expected_v: Fr = a.iter().zip(b.iter()).map(|(x, y)| *x * y).sum();
 
         let mut prover_transcript = fresh_transcript();
         let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
@@ -507,7 +550,7 @@ mod tests {
         let result = ipa_verify_single(
             &params,
             commitment,
-            claimed_eval,
+            expected_v,
             &b,
             &proof,
             &mut verifier_transcript,
@@ -562,8 +605,8 @@ mod tests {
         let b = vec![Fr::ONE, zeta]; // coefficient basis
 
         let commitment = best_multiexp(&a, &params.ck[..n]).to_affine();
-        let claimed_eval = a[0] + a[1] * zeta; // = 3 + 7 · 11 = 80
-        assert_eq!(claimed_eval, Fr::from(80));
+        let expected_v = a[0] + a[1] * zeta; // = 3 + 7 · 11 = 80
+        assert_eq!(expected_v, Fr::from(80));
 
         let mut prover_transcript = fresh_transcript();
         let proof = ipa_prove_single(&params, &a, &b, &mut prover_transcript);
@@ -573,7 +616,7 @@ mod tests {
         let result = ipa_verify_single(
             &params,
             commitment,
-            claimed_eval,
+            expected_v,
             &b,
             &proof,
             &mut verifier_transcript,

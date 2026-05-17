@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use crate::ff::{Field, FromUniformBytes, PrimeField, PrimeFieldBits};
 use crate::fft::best_fft;
-use crate::nifs::sangria::ipa::{ipa_prove_single, ipa_verify_single, IpaParams, IpaProof};
+use crate::nifs::sangria::ipa::{
+    IpaParams, IpaProof, ipa_prove_single, ipa_prove_single_with_generators, ipa_verify_single, ipa_verify_single_with_generators
+};
 use crate::nifs::sangria::permutation::{
     build_permutation_grand_product, build_permutation_params, gather_commitments_with_permutation,
     gather_openings_with_permutation, l_0_evals, PermutationParams,
@@ -582,16 +584,14 @@ where
         // Z is the only polynomial that opens at a shifted point.
         // We prove it separately to keep the main IPA's b vector uniform.
         // ----------------------------------------------------------------
-        let mut z_embedded = vec![C::ScalarExt::ZERO; total_len];
-        z_embedded[..n].copy_from_slice(&z_evals);
-
-        let mut b_embedded_zw = Vec::with_capacity(total_len);
-        for _ in 0..num_blocks {
-            b_embedded_zw.extend_from_slice(&lagrange_at_zeta_omega);
-        }
-
-        let opening_proof_zw =
-            ipa_prove_single(&pp.ipa_params, &z_embedded, &b_embedded_zw, transcript);
+        let z_generators = &pp.ipa_params.ck[0..n];
+        let opening_proof_zw = ipa_prove_single_with_generators(
+            z_generators,
+            &pp.ipa_params.aux,
+            &z_evals,
+            &lagrange_at_zeta_omega,
+            transcript,
+        );
 
         let prover_elapsed = prover_start.elapsed();
         println!(
@@ -870,16 +870,13 @@ where
         // ----------------------------------------------------------------
         // Step 9: verify the separate IPA for Z at ζω.
         // ----------------------------------------------------------------
-        let mut b_embedded_zw = Vec::with_capacity(total_len);
-        for _ in 0..num_blocks {
-            b_embedded_zw.extend_from_slice(&lagrange_at_zeta_omega);
-        }
-
-        ipa_verify_single(
-            &vp.ipa_params,
+        let z_generators = &vp.ipa_params.ck[0..n];
+        ipa_verify_single_with_generators(
+            z_generators,
+            &vp.ipa_params.aux,
             proof.z_commitment,
             proof.evals.z_at_zeta_omega,
-            &b_embedded_zw,
+            &lagrange_at_zeta_omega,
             &proof.opening_proof_zw,
             transcript,
         )?;
