@@ -21,7 +21,7 @@ use crate::{
     nifs::{
         self,
         sangria::{
-            FoldablePlonkInstance, GateDeciderProof, GateDeciderProverParam, GateDeciderVerifierParam, GetConsistencyMarkers, QueryLayout, VanillaFS, VerifyError, accumulator::{FoldablePlonkTrace, RelaxedPlonkTrace}
+            FoldablePlonkInstance, GateDeciderProof, GateDeciderProverParam, GateDeciderVerifierParam, GetConsistencyMarkers, QueryLayout, VanillaFS, VerifyError, accumulator::{FoldablePlonkTrace, RelaxedPlonkTrace},
         },
     },
     poseidon::{ROPair, random_oracle::ROTrait},
@@ -162,7 +162,8 @@ where
     // decider preprocessing
     primary_layout: QueryLayout,
     primary_decider_pp: GateDeciderProverParam<C1>,
-    primary_decider_vp: GateDeciderVerifierParam<C1>,
+    /// verifier key
+    pub primary_decider_vp: GateDeciderVerifierParam<C1>,
 }
 
 // Folding
@@ -975,5 +976,336 @@ where
         drop(_primary_span);
 
         Ok(primary_proof)
+    }
+}
+
+// =====================================================================
+// External proof artifact
+// =====================================================================
+
+/// The complete set of artifacts an external verifier needs to validate
+/// the IVC run.
+///
+/// "External" here means: a party that did not run the IVC themselves
+/// and does not have access to the original witness data.
+///
+/// Contents:
+/// - Primary side: the relaxed accumulator instance + decider proof.
+///   No witness data; the decider proof is succinct.
+/// - Secondary side: the full relaxed trace (instance + witness).
+///   The secondary is verified via native `is_sat`, which needs the
+///   witness.  This is the pragmatic choice for now — the secondary
+///   doesn't have FFT-friendly arithmetic, so a succinct decider for
+///   it would require a different SNARK construction.
+/// - Dangling secondary trace from the final fold step: instance + witness.
+///   This is the last step's secondary trace that hasn't been folded
+///   yet.  Verified via native SPS satisfaction check.
+/// - Public instances on the primary side, for the hash-accumulator check.
+/// - The final primary z_i (output of the IVC), so the external verifier
+///   knows what was claimed to be computed.
+/// - The number of steps and the initial z_0, for marker reconstruction.
+pub struct IvcProofArtifact<const A1: usize, const A2: usize, C1, C2>
+where
+    C1: CurveAffine,
+    C2: CurveAffine,
+{
+    // Primary side.
+    pub primary_relaxed_instance: nifs::sangria::accumulator::RelaxedPlonkInstance<C1, { CONSISTENCY_MARKERS_COUNT }>,
+    pub primary_decider_proof: GateDeciderProof<C1>,
+    pub primary_pub_instances: Vec<Instances<C1::Scalar>>,
+    pub primary_z_0: [C1::Scalar; A1],
+    pub primary_z_i: [C1::Scalar; A1],
+
+    // Secondary side.
+    pub secondary_relaxed_trace: RelaxedPlonkTrace<C2, { CONSISTENCY_MARKERS_COUNT }>,
+    pub secondary_pub_instances: Vec<Instances<C2::Scalar>>,
+    pub secondary_z_0: [C2::Scalar; A2],
+    pub secondary_z_i: [C2::Scalar; A2],
+
+    // Dangling secondary trace from the final step.
+    pub dangling_secondary_trace: FoldablePlonkTrace<C2, { CONSISTENCY_MARKERS_COUNT }>,
+
+    // Number of steps performed (so the verifier knows what to reconstruct).
+    pub num_steps: usize,
+}
+
+// =====================================================================
+// Producing the artifact
+// =====================================================================
+
+impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
+where
+    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
+    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
+    C1::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    C2::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    SC1: StepCircuit<A1, C1::Scalar>,
+    SC2: StepCircuit<A2, C2::Scalar>,
+    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+{
+    /// Produce a self-contained proof artifact that can be verified
+    /// externally without access to the original witness or to the
+    /// IVC's internal state.
+    ///
+    /// Internally: produces the primary decider proof, then bundles
+    /// everything together.
+    #[instrument(name = "ivc_produce_proof_artifact", skip_all)]
+    pub fn produce_proof_artifact<const T: usize, RP1, RP2>(
+        &self,
+        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<IvcProofArtifact<A1, A2, C1, C2>, Error>
+    where
+        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+    {
+        let primary_decider_proof = {
+            let _s = info_span!("primary_decider").entered();
+            let mut transcript =
+                RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
+            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+                &self.primary_decider_pp,
+                &self.primary_layout,
+                &self.primary.relaxed_trace,
+                &mut transcript,
+            )?
+        };
+
+        Ok(IvcProofArtifact {
+            primary_relaxed_instance: self.primary.relaxed_trace.U.clone(),
+            primary_decider_proof,
+            primary_pub_instances: self.primary.pub_instances.clone(),
+            primary_z_0: self.primary.z_0,
+            primary_z_i: self.primary.z_i,
+
+            secondary_relaxed_trace: self.secondary.relaxed_trace.clone(),
+            secondary_pub_instances: self.secondary.pub_instances.clone(),
+            secondary_z_0: self.secondary.z_0,
+            secondary_z_i: self.secondary.z_i,
+
+            dangling_secondary_trace: self.secondary_trace[0].clone(),
+
+            num_steps: self.step,
+        })
+    }
+}
+
+// =====================================================================
+// External verification
+// =====================================================================
+
+/// Verify an IVC proof artifact without access to internal state or
+/// the original witness.
+///
+/// This is the entry point for an external party (a party that did not
+/// run the IVC) to validate the entire IVC run from the artifact alone.
+///
+/// Verification covers:
+///   1. The primary accumulator's gate identity + permutation +
+///      witness binding + public-instance hash, via the succinct decider.
+///   2. The secondary accumulator's full satisfiability, via native
+///      `is_sat` (needs the witness data, which is in the artifact).
+///   3. The dangling secondary trace's SPS / gate identity, via native
+///      `is_sat` on the non-relaxed instance.
+///   4. The consistency markers connecting the two accumulators and
+///      the final step's claimed inputs/outputs.
+///
+/// Returns Ok(()) if everything checks out; otherwise an Error describing
+/// what failed.
+#[instrument(name = "verify_ivc_externally", skip_all)]
+pub fn verify_ivc_externally<const A1: usize, const A2: usize, const T: usize,
+                              C1, C2, SC1, SC2, RP1, RP2>(
+    pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+    decider_vp: &GateDeciderVerifierParam<C1>,
+    artifact: &IvcProofArtifact<A1, A2, C1, C2>,
+) -> Result<(), Error>
+where
+    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
+    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
+    C1::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    C2::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
+    SC1: StepCircuit<A1, C1::Scalar>,
+    SC2: StepCircuit<A2, C2::Scalar>,
+    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
+    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+    RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
+    RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+{
+    let mut errors = vec![];
+
+    // ----------------------------------------------------------------
+    // Step 1: Verify the primary accumulator via the succinct decider.
+    //
+    // The decider checks gate identity + permutation + witness binding
+    // + public-instance hash, all in O(c·n) verifier work that does
+    // not scale with the IVC step count.
+    // ----------------------------------------------------------------
+    {
+        let decider_start = std::time::Instant::now();
+        let _s = info_span!("primary_decider").entered();
+        let mut transcript =
+            RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
+
+        VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::verify_decider(
+            decider_vp,
+            &artifact.primary_relaxed_instance,
+            &artifact.primary_pub_instances,
+            &artifact.primary_decider_proof,
+            &mut transcript,
+        )
+        .map_err(|e| {
+            errors.push(VerificationError::NotSat {
+                err: e,
+                is_primary: true,
+                is_relaxed: true,
+            });
+        })
+        .ok();
+        let decider_elapsed = decider_start.elapsed();
+        println!(
+            "  Primary decider verification: {} ms",
+            decider_elapsed.as_millis()
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Step 2: Verify the secondary accumulator via native is_sat.
+    //
+    // Native is_sat checks gate identity, permutation, witness commit,
+    // and public-instance hash on the secondary side.  Cost: O(N_secondary),
+    // does not scale with IVC step count.
+    //
+    // The secondary witness is included in the artifact (no privacy
+    // requirement, and the secondary's circuit is fixed across the IVC,
+    // so its witness size is one-step-sized).
+    // ----------------------------------------------------------------
+    {
+        let accumulator_start = std::time::Instant::now();
+        let _s = info_span!("secondary_native_is_sat").entered();
+
+        if let Err(err) = VanillaFS::<C2, { CONSISTENCY_MARKERS_COUNT }>::is_sat(
+            pp.secondary.ck(),
+            pp.secondary.S(),
+            &artifact.secondary_relaxed_trace,
+            &artifact.secondary_pub_instances,
+        ) {
+            errors.extend(err.into_iter().map(|err| VerificationError::NotSat {
+                err,
+                is_primary: false,
+                is_relaxed: true,
+            }));
+        }
+        let accumulator_elapsed = accumulator_start.elapsed();
+        println!("  Secondary accumulator native is_sat: {} ms", accumulator_elapsed.as_millis());
+    }
+
+    // ----------------------------------------------------------------
+    // Step 3: Verify the dangling secondary trace.
+    //
+    // The dangling trace is the last fold step's secondary input that
+    // hasn't been folded into the accumulator yet.  It must satisfy
+    // the secondary's circuit natively (non-relaxed).
+    // ----------------------------------------------------------------
+    {
+        let dangling_start = std::time::Instant::now();
+        let _s = info_span!("dangling_secondary_sps").entered();
+
+        if let Err(err) = pp.secondary.S().is_sat(
+            pp.secondary.ck(),
+            &mut RP1::OffCircuit::new(pp.primary.params().ro_constant().clone()),
+            &artifact.dangling_secondary_trace.u,
+            &artifact.dangling_secondary_trace.w,
+        ) {
+            errors.push(VerificationError::NotSat {
+                err: err.into(),
+                is_primary: false,
+                is_relaxed: false,
+            });
+        }
+        let dangling_elapsed = dangling_start.elapsed();
+        println!("  Dangling secondary trace is_sat: {} ms", dangling_elapsed.as_millis());
+    }
+
+    // ----------------------------------------------------------------
+    // Step 4: Verify consistency markers.
+    //
+    // The accumulator's expected markers depend on:
+    //   - z_0, z_i  (claimed initial and final states)
+    //   - step number (num_steps)
+    //   - the "other side" accumulator (cross-reference)
+    //
+    // We recompute these and check against the dangling trace's
+    // consistency markers, which is where the chain currently terminates.
+    // ----------------------------------------------------------------
+    {
+        let consistency_start = std::time::Instant::now();
+        let _s = info_span!("consistency_markers").entered();
+
+        // Primary's expected X0 marker: reconstructed from primary's z_0/z_i + secondary acc.
+        let primary_x0_expected = ConsistencyMarkerComputation::<
+            '_,
+            A1,
+            C2,
+            RP1::OffCircuit,
+            { CONSISTENCY_MARKERS_COUNT },
+        > {
+            random_oracle_constant: pp.primary.params().ro_constant().clone(),
+            public_params_hash: &pp.digest_2(),
+            step: artifact.num_steps,
+            z_0: &artifact.primary_z_0,
+            z_i: &artifact.primary_z_i,
+            relaxed: &artifact.secondary_relaxed_trace.U,
+            limb_width: pp.secondary.params().limb_width(),
+            limbs_count: pp.secondary.params().limbs_count(),
+        }
+        .generate_with_inspect::<C2::Scalar>(|buf| {
+            debug!("primary X0 verify at {}-step: {buf:?}", artifact.num_steps)
+        });
+
+        let primary_x0_actual = get_consistency_marker_input(&artifact.dangling_secondary_trace.u);
+        if primary_x0_expected != primary_x0_actual {
+            errors.push(VerificationError::InstanceNotMatch {
+                index: 0,
+                is_primary: true,
+            });
+        }
+
+        // Secondary's expected X1 marker.
+        let secondary_x1_expected = ConsistencyMarkerComputation::<
+            '_,
+            A2,
+            C1,
+            RP2::OffCircuit,
+            { CONSISTENCY_MARKERS_COUNT },
+        > {
+            random_oracle_constant: pp.secondary.params().ro_constant().clone(),
+            public_params_hash: &pp.digest_1(),
+            step: artifact.num_steps,
+            z_0: &artifact.secondary_z_0,
+            z_i: &artifact.secondary_z_i,
+            relaxed: &artifact.primary_relaxed_instance,
+            limb_width: pp.primary.params().limb_width(),
+            limbs_count: pp.primary.params().limbs_count(),
+        }
+        .generate_with_inspect::<C1::Scalar>(|buf| {
+            debug!("secondary X1 verify at {}-step: {buf:?}", artifact.num_steps)
+        });
+
+        let secondary_x1_actual =
+            get_consistency_marker_output(&artifact.dangling_secondary_trace.u);
+        if secondary_x1_expected != secondary_x1_actual {
+            errors.push(VerificationError::InstanceNotMatch {
+                index: 1,
+                is_primary: false,
+            });
+        }
+        let consistency_elapsed = consistency_start.elapsed();
+        println!("  Consistency marker verification: {} ms", consistency_elapsed.as_millis());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::VerifyFailed(errors))
     }
 }

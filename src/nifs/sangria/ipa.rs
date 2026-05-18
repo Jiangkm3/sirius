@@ -4,7 +4,9 @@ use crate::ff::{Field, FromUniformBytes, PrimeField};
 use crate::group::Curve;
 use crate::nifs::sangria::VerifyError;
 use halo2_proofs::arithmetic::{best_multiexp, CurveAffine, CurveExt};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 
 use crate::{commitment::CommitmentKey, constants::NUM_CHALLENGE_BITS, poseidon::ROTrait};
 
@@ -80,21 +82,15 @@ where
     RO: ROTrait<C::Base>,
     C::Base: FromUniformBytes<64>,
 {
-    ipa_prove_single_with_generators(
-        &params.ck[..],
-        &params.aux,
-        a,
-        b,
-        transcript,
-    )
+    ipa_prove_single_with_generators(&params.ck[..], &params.aux, a, b, transcript)
 }
 
 // Core implementation that takes generators explicitly.
 pub fn ipa_prove_single_with_generators<C: CurveAffine>(
-    generators: &[C],       // length L (any power of 2)
-    aux: &C,                // auxiliary generator for v · H
-    f: &[C::ScalarExt],     // length L
-    b: &[C::ScalarExt],     // length L
+    generators: &[C],   // length L (any power of 2)
+    aux: &C,            // auxiliary generator for v · H
+    f: &[C::ScalarExt], // length L
+    b: &[C::ScalarExt], // length L
     transcript: &mut impl ROTrait<C::Base>,
 ) -> IpaProof<C>
 where
@@ -282,28 +278,42 @@ where
 // Closed-form helpers
 // =====================================================================
 
-/// Compute s_i for i in 0..n.
+/// Compute s_i for i in 0..n in O(n) field operations.
 ///
-/// s_i = Π_{j=0}^{k-1}  ( u_{k-1-j}        if bit_j(i) = 1 )
-///                     ( u_{k-1-j}^{-1}    if bit_j(i) = 0 )
+/// Recursive doubling: starts with s = [1], doubles in size each iteration
+/// by multiplying existing entries by challenges_inv (the "bit = 0" extension)
+/// and creating new entries via multiplication by challenges (the "bit = 1"
+/// extension).
 ///
-/// (Indexing convention matches Halo2.  Double-check against halo2
-/// reference if hooking into an existing transcript order.)
-fn compute_s<F: PrimeField>(challenges: &[F], challenges_inv: &[F], n: usize) -> Vec<F> {
+/// Indexing convention: bit j of i (j ∈ [0, k)) selects challenges[k-1-j].
+/// This matches the naive O(n log n) version.
+fn compute_s<F: PrimeField + Send + Sync>(
+    challenges: &[F],
+    challenges_inv: &[F],
+    n: usize,
+) -> Vec<F> {
     let k = challenges.len();
     debug_assert_eq!(1 << k, n);
+    debug_assert_eq!(challenges_inv.len(), k);
 
     let mut s = vec![F::ONE; n];
-    for i in 0..n {
-        for j in 0..k {
-            let bit = (i >> j) & 1;
-            if bit == 1 {
-                s[i] *= challenges[k - 1 - j];
-            } else {
-                s[i] *= challenges_inv[k - 1 - j];
-            }
-        }
+    let mut half_size = 1;
+    for j in (0..k).rev() {
+        let u = challenges[j];
+        let u_inv = challenges_inv[j];
+
+        let (lower, upper) = s[..2 * half_size].split_at_mut(half_size);
+        lower
+            .par_iter_mut()
+            .zip(upper.par_iter_mut())
+            .for_each(|(s_lo, s_hi)| {
+                *s_hi = *s_lo * u;
+                *s_lo *= u_inv;
+            });
+
+        half_size *= 2;
     }
+
     s
 }
 
@@ -376,12 +386,7 @@ fn compute_b_after_rounds<F: Field>(b: &[F], challenges: &[F]) -> F {
 ///
 /// Expected cost: ~256 doublings + ~64 additions (vs ~512 doublings + ~256 additions
 /// for two separate scalar muls).
-pub fn double_scalar_mul<C: CurveExt>(
-    a: C::ScalarExt,
-    p: &C,
-    b: C::ScalarExt,
-    q: &C,
-) -> C
+pub fn double_scalar_mul<C: CurveExt>(a: C::ScalarExt, p: &C, b: C::ScalarExt, q: &C) -> C
 where
     C::ScalarExt: PrimeField,
 {
@@ -391,22 +396,22 @@ where
     let q2 = q.double();
 
     let table: [C; 16] = [
-        C::identity(),                  // 0000
-        *p,                             // 0001 -> a=01, b=00 -> 1·P
-        p2,                             // 0010 -> a=10, b=00 -> 2·P
-        p2 + p,                         // 0011 -> a=11, b=00 -> 3·P
-        *q,                             // 0100 -> a=00, b=01 -> 1·Q
-        *p + *q,                        // 0101
-        p2 + *q,                        // 0110
-        p2 + *p + *q,                   // 0111
-        q2,                             // 1000 -> a=00, b=10 -> 2·Q
-        *p + q2,                        // 1001
-        p2 + q2,                        // 1010
-        p2 + *p + q2,                   // 1011
-        q2 + *q,                        // 1100 -> a=00, b=11 -> 3·Q
-        *p + q2 + *q,                   // 1101
-        p2 + q2 + *q,                   // 1110
-        p2 + *p + q2 + *q,              // 1111
+        C::identity(),     // 0000
+        *p,                // 0001 -> a=01, b=00 -> 1·P
+        p2,                // 0010 -> a=10, b=00 -> 2·P
+        p2 + p,            // 0011 -> a=11, b=00 -> 3·P
+        *q,                // 0100 -> a=00, b=01 -> 1·Q
+        *p + *q,           // 0101
+        p2 + *q,           // 0110
+        p2 + *p + *q,      // 0111
+        q2,                // 1000 -> a=00, b=10 -> 2·Q
+        *p + q2,           // 1001
+        p2 + q2,           // 1010
+        p2 + *p + q2,      // 1011
+        q2 + *q,           // 1100 -> a=00, b=11 -> 3·Q
+        *p + q2 + *q,      // 1101
+        p2 + q2 + *q,      // 1110
+        p2 + *p + q2 + *q, // 1111
     ];
 
     // Get scalar bytes.
@@ -682,5 +687,30 @@ mod tests {
             b_final, b_final_closed,
             "iterative folding and closed form must agree for coefficient basis"
         );
+    }
+
+    #[test]
+    fn compute_s_doubling_matches_naive() {
+        let k = 10;
+        let n = 1 << k;
+        let challenges: Vec<Fr> = (1..=k as u64).map(Fr::from).collect();
+        let challenges_inv: Vec<Fr> = challenges.iter().map(|u| u.invert().unwrap()).collect();
+
+        let s_doubling = compute_s(&challenges, &challenges_inv, n);
+
+        // Naive version for comparison.
+        let mut s_naive = vec![Fr::ONE; n];
+        for i in 0..n {
+            for j in 0..k {
+                let bit = (i >> j) & 1;
+                if bit == 1 {
+                    s_naive[i] *= challenges[k - 1 - j];
+                } else {
+                    s_naive[i] *= challenges_inv[k - 1 - j];
+                }
+            }
+        }
+
+        assert_eq!(s_doubling, s_naive, "doubling must match naive");
     }
 }

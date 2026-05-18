@@ -595,10 +595,6 @@ where
     ///
     /// When the permutation argument is added, this function will also
     /// invoke verify_decider_permutation_part.
-    ///
-    /// Note: this is the *full* verification path replacing `is_sat`.
-    /// The verifier does not need the witness — only the instance, the
-    /// proof, and the claimed public instances.
     pub fn verify_decider(
         decider_vp: &GateDeciderVerifierParam<C>,
         U_final: &RelaxedPlonkInstance<C, MARKERS_LEN>,

@@ -225,8 +225,6 @@ where
         acc: &RelaxedPlonkTrace<C, MARKERS_LEN>,
         transcript: &mut impl ROTrait<C::Base>,
     ) -> Result<GateDeciderProof<C>, Error> {
-        let prover_start = std::time::Instant::now();
-
         let RelaxedPlonkTrace { U, W } = acc;
         let n = 1usize << pp.S.k;
         let gate_expr = pp.S.custom_gates_lookup_compressed.homogeneous();
@@ -591,12 +589,6 @@ where
             &z_evals,
             &lagrange_at_zeta_omega,
             transcript,
-        );
-
-        let prover_elapsed = prover_start.elapsed();
-        println!(
-            "Prover time for gate decider: {} s",
-            prover_elapsed.as_millis() / 1000
         );
 
         Ok(GateDeciderProof {

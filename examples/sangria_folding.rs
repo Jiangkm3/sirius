@@ -6,12 +6,10 @@ use halo2_proofs::{
 use sirius::{
     fft::CurveAffine,
     ivc::{
-        step_circuit::{trivial, AssignedCell, ConstraintSystem, Layouter},
-        SangriaIVC, StepCircuit, SynthesisError,
+        SangriaIVC, StepCircuit, SynthesisError, sangria::incrementally_verifiable_computation::verify_ivc_externally, step_circuit::{AssignedCell, ConstraintSystem, Layouter, trivial}
     },
     sangria_prelude::{
-        bn256::{new_default_pp, C1Affine, C1Scalar, C2Affine, C2Scalar},
-        CommitmentKey, PrimeField,
+        CommitmentKey, PrimeField, bn256::{C1Affine, C1Scalar, C2Affine, C2Scalar, new_default_pp}
     },
 };
 use std::{array, io, path::Path};
@@ -181,6 +179,7 @@ fn main() {
         [C1Scalar::from(1), C1Scalar::from(10)], // Step 3
     ];
 
+    let folding_start = std::time::Instant::now();
     let mut ivc =
         SangriaIVC::new(&pp, &sc1_template, z0_primary, &sc2, z0_secondary, true).unwrap();
 
@@ -192,17 +191,29 @@ fn main() {
 
         println!("Step {} output state: {:?}", i + 1, ivc.primary_zi());
     }
+    let folding_elapsed = folding_start.elapsed();
+    println!("Total folding time: {} ms", folding_elapsed.as_millis());
 
-    // Produce decider proof
-    // let (primary_proof, secondary_proof) = ivc.prove_decider(&pp).expect("decider proof failed");
+    // After folding completes:
+    let deciding_start = std::time::Instant::now();
+    let artifact = ivc.produce_proof_artifact(&pp).unwrap();
+    let deciding_elapsed = deciding_start.elapsed();
+    println!("Deciding time: {} ms", deciding_elapsed.as_millis());
 
-    // Additionally: check z0 and zi
+    // Verbose checker
+    let sat_start = std::time::Instant::now();
     ivc.verify(&pp).expect("Verification failed");
-    println!("Folding verification successful!");
+    let sat_elapsed = sat_start.elapsed();
+    println!("Satisfiability check time: {} ms", sat_elapsed.as_millis());
 
-    let _primary_proof = ivc
-        .check_gate_decider(&pp)
-        .expect("Gate decider check failed");
+    // Succinct checker
+    let decider_vp = &ivc.primary_decider_vp;
+    let verifying_start = std::time::Instant::now();
+    verify_ivc_externally(&pp, decider_vp, &artifact).expect("Verification failed");
+    let verifying_elapsed = verifying_start.elapsed();
+    println!("Verifying time: {} ms", verifying_elapsed.as_millis());
+
+    println!("External verification successful!");
 
     println!("Gate decider successful!");
 }
