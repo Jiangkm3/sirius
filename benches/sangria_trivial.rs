@@ -7,15 +7,9 @@ use criterion::{black_box, criterion_group, Criterion};
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
 use sirius::{
-    commitment::CommitmentKey,
-    ff::Field,
-    group::{prime::PrimeCurve, Group},
-    halo2curves::{bn256, grumpkin, CurveAffine, CurveExt},
-    ivc::{
-        sangria::{CircuitPublicParamsInput, PublicParams},
-        step_circuit, SangriaIVC,
-    },
-    poseidon::{self, ROPair},
+    commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, ff::Field, group::{Group, prime::PrimeCurve}, halo2curves::{CurveAffine, CurveExt, bn256, grumpkin}, ivc::{
+        SangriaIVC, sangria::{CircuitPublicParamsInput, PublicParams}, step_circuit
+    }, poseidon::{self, ROPair}
 };
 use tracing::*;
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
@@ -111,7 +105,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let secondary_z_0 = array::from_fn(|_| C2Scalar::random(&mut rnd));
 
         b.iter(|| {
-            SangriaIVC::fold(
+            SangriaIVC::<ARITY, ARITY, Bn256Cycle, _, _>::fold(
                 &pp,
                 &sc1,
                 black_box(primary_z_0),
@@ -129,7 +123,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let secondary_z_0 = array::from_fn(|_| C2Scalar::random(&mut rnd));
 
         b.iter(|| {
-            SangriaIVC::fold(
+            SangriaIVC::<ARITY, ARITY, Bn256Cycle, _, _>::fold(
                 &pp,
                 &sc1,
                 black_box(primary_z_0),

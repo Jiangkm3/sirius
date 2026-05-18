@@ -19,9 +19,7 @@
 use std::{array, env};
 
 use sirius::{
-    commitment::CommitmentKey,
-    ivc::{step_circuit::trivial, SangriaIVC},
-    sangria_prelude::bn256::{new_default_pp, C1Affine, C1Scalar, C2Affine, C2Scalar},
+    commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, ivc::{SangriaIVC, step_circuit::trivial}, sangria_prelude::bn256::{C1Affine, C1Scalar, C2Affine, C2Scalar, new_default_pp}
 };
 use tracing::info_span;
 use tracing_subscriber::{filter::LevelFilter, fmt::format::FmtSpan, EnvFilter};
@@ -104,7 +102,7 @@ fn main() {
     // Step 4: Initialize the IVC with starting state values
     // - For primary circuit: [0, 1, 2, 3, 4]
     // - For secondary circuit: [0]
-    let mut ivc = SangriaIVC::new(
+    let mut ivc = SangriaIVC::<PRIMARY_CIRCUIT_ARITY, SECONDARY_CIRCUIT_ARITY, Bn256Cycle, _, _>::new(
         &public_params,
         &primary_circuit,
         array::from_fn(|i| C1Scalar::from(i as u64)), // Primary circuit initial state z_0

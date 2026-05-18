@@ -2,14 +2,11 @@ use std::array;
 
 use halo2_proofs::{circuit::Value, plonk::{Advice, Column, Fixed}, poly::Rotation};
 use sirius::{
-    ivc::{
-        step_circuit::{trivial, AssignedCell, ConstraintSystem, Layouter},
-        SangriaIVC, StepCircuit, SynthesisError,
-    },
-    sangria_prelude::{
-        bn256::{new_default_pp, C1Affine, C1Scalar, C2Affine, C2Scalar},
-        CommitmentKey, PrimeField,
-    },
+    cyclefold_prelude::bn256::Bn256Cycle, ivc::{
+        SangriaIVC, StepCircuit, SynthesisError, step_circuit::{AssignedCell, ConstraintSystem, Layouter, trivial}
+    }, sangria_prelude::{
+        CommitmentKey, PrimeField, bn256::{C1Affine, C1Scalar, C2Affine, C2Scalar, new_default_pp}
+    }
 };
 
 const ARITY: usize = 1;
@@ -148,7 +145,7 @@ fn main() {
         C1Scalar::from(1),   // Step 3: 2 * (22010 * 1 + 5) = 44030
     ];
 
-    let mut ivc = SangriaIVC::new(&pp, &sc1, z0_primary, &sc2, z0_secondary, true).unwrap();
+    let mut ivc = SangriaIVC::<ARITY, 1, Bn256Cycle, _, _>::new(&pp, &sc1, z0_primary, &sc2, z0_secondary, true).unwrap();
 
     for (i, val) in inputs.into_iter().enumerate() {
         // Create circuit instance with the unique private witness

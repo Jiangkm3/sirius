@@ -5,12 +5,7 @@ use bn256::G1 as C1;
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
 use sirius::{
-    commitment::CommitmentKey,
-    gadgets::poseidon_step_circuit::TestPoseidonCircuit,
-    group::{prime::PrimeCurve, Group},
-    halo2curves::{bn256, grumpkin, CurveAffine},
-    ivc::{sangria, step_circuit},
-    poseidon::{self, ROPair},
+    commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, gadgets::poseidon_step_circuit::TestPoseidonCircuit, group::{Group, prime::PrimeCurve}, halo2curves::{CurveAffine, bn256, grumpkin}, ivc::{sangria, step_circuit}, poseidon::{self, ROPair}
 };
 use tracing::*;
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
@@ -126,7 +121,7 @@ fn main() {
     let primary_input = array::from_fn(|i| C1Scalar::from(i as u64));
     let secondary_input = array::from_fn(|i| C2Scalar::from(i as u64));
 
-    sangria::IVC::fold_with_debug_mode(
+    sangria::IVC::<ARITY, ARITY, Bn256Cycle, _, _>::fold_with_debug_mode(
         &pp,
         &primary,
         primary_input,

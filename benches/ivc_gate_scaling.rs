@@ -8,15 +8,10 @@ use std::{array, convert::TryInto, marker::PhantomData, path::Path};
 use criterion::{criterion_group, criterion_main, Criterion};
 use itertools::multizip;
 use sirius::{
-    commitment::CommitmentKey,
-    ff::{FromUniformBytes, PrimeField},
-    gadgets::poseidon_step_circuit::TestPoseidonCircuit,
-    halo2_proofs::{
+    commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, ff::{FromUniformBytes, PrimeField}, gadgets::poseidon_step_circuit::TestPoseidonCircuit, halo2_proofs::{
         circuit::{AssignedCell, Layouter},
         plonk::{self, ConstraintSystem},
-    },
-    halo2curves::{bn256, grumpkin, CurveAffine},
-    ivc::{self, cyclefold, sangria, StepCircuit, SynthesisError},
+    }, halo2curves::{CurveAffine, bn256, grumpkin}, ivc::{self, StepCircuit, SynthesisError, cyclefold, sangria}
 };
 
 /// Base arity for the step circuit.
@@ -160,7 +155,7 @@ where
             let primary_input = z_in;
             let secondary_input = array::from_fn(|i| bn256::Fq::from(i as u64));
 
-            let mut ivc = sangria::IVC::new(
+            let mut ivc = sangria::IVC::<OVERALL_ARITY, 1, Bn256Cycle, _, _>::new(
                 &pp,
                 &multi_circuit,
                 primary_input,

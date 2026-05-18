@@ -138,57 +138,69 @@ pub enum VerificationError {
     },
 }
 
+/// Trait defining the curve cycle used in the IVC.
+pub trait IvcCurveCycle {
+    // C1 is a curve whose Base field matches C2's Scalar field
+    type C1: CurveAffine<
+            Base = <Self::C2 as PrimeCurveAffine>::Scalar, 
+            ScalarExt = Self::C1Scalar
+         > + Serialize;
+
+    // C2 is a curve whose Base field matches C1's Scalar field
+    type C2: CurveAffine<
+            Base = <Self::C1 as PrimeCurveAffine>::Scalar, 
+            ScalarExt = Self::C2Scalar
+         > + Serialize;
+
+    // Associated types to bubble up the scalar and constraint requirements cleanly
+    type C1Scalar: Serialize + Ord + WithSmallOrderMulGroup<3> + PrimeFieldBits + FromUniformBytes<64>;
+    type C2Scalar: Serialize + Ord + WithSmallOrderMulGroup<3> + PrimeFieldBits + FromUniformBytes<64>;
+}
+
 // TODO #31 docs
 #[allow(clippy::upper_case_acronyms)]
 /// RecursiveSNARK from Nova codebase
-pub struct IVC<const A1: usize, const A2: usize, C1, C2, SC1, SC2>
+pub struct IVC<const A1: usize, const A2: usize, Cycle, SC1, SC2>
 where
-    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar>,
-    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar>,
-    SC1: StepCircuit<A1, C1::Scalar>,
-    SC2: StepCircuit<A2, C2::Scalar>,
-    C1::Scalar: PrimeFieldBits + FromUniformBytes<64>,
-    C2::Scalar: PrimeFieldBits + FromUniformBytes<64>,
+    Cycle: IvcCurveCycle,
+    SC1: StepCircuit<A1, Cycle::C1Scalar>,
+    SC2: StepCircuit<A2, Cycle::C2Scalar>,
 {
+
     // existing fields ...
-    primary: StepCircuitContext<A1, C1, SC1>,
-    secondary: StepCircuitContext<A2, C2, SC2>,
+    primary: StepCircuitContext<A1, Cycle::C1, SC1>,
+    secondary: StepCircuitContext<A2, Cycle::C2, SC2>,
     step: usize,
-    secondary_nifs_pp: nifs::sangria::ProverParam<C2>,
-    primary_nifs_pp: nifs::sangria::ProverParam<C1>,
-    secondary_trace: [FoldablePlonkTrace<C2, { CONSISTENCY_MARKERS_COUNT }>; 1],
+    secondary_nifs_pp: nifs::sangria::ProverParam<Cycle::C2>,
+    primary_nifs_pp: nifs::sangria::ProverParam<Cycle::C1>,
+    secondary_trace: [FoldablePlonkTrace<Cycle::C2, { CONSISTENCY_MARKERS_COUNT }>; 1],
     debug_mode: bool,
 
     // decider preprocessing
     primary_layout: QueryLayout,
-    primary_decider_pp: GateDeciderProverParam<C1>,
+    primary_decider_pp: GateDeciderProverParam<Cycle::C1>,
     /// verifier key
-    pub primary_decider_vp: GateDeciderVerifierParam<C1>,
+    pub primary_decider_vp: GateDeciderVerifierParam<Cycle::C1>,
 }
 
 // Folding
-impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
+impl<const A1: usize, const A2: usize, Cycle: IvcCurveCycle, SC1, SC2> IVC<A1, A2, Cycle, SC1, SC2>
 where
-    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
-    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
-    C1::ScalarExt: Serialize,
-    C2::ScalarExt: Serialize,
-    SC1: StepCircuit<A1, C1::Scalar>,
-    SC2: StepCircuit<A2, C2::Scalar>,
-    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
-    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+    Cycle: IvcCurveCycle,
+    SC1: StepCircuit<A1, Cycle::C1Scalar>,
+    SC2: StepCircuit<A2, Cycle::C2Scalar>,
 {
     pub fn fold_with_debug_mode<const T: usize, RP1, RP2>(
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
-        primary_z_0: [C1::Scalar; A1],
+        primary_z_0: [Cycle::C1Scalar; A1],
         secondary: &SC2,
-        secondary_z_0: [C2::Scalar; A2],
+        secondary_z_0: [Cycle::C2Scalar; A2],
         num_steps: NonZeroUsize,
     ) -> Result<(), Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<Cycle::C1Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<Cycle::C2Scalar, Config = MainGateConfig<T>>,
     {
         let mut ivc = Self::new(pp, primary, primary_z_0, secondary, secondary_z_0, true)?;
         trace!("IVC created");
@@ -205,16 +217,16 @@ where
         Ok(())
     }
     pub fn fold<const T: usize, RP1, RP2>(
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
-        primary_z_0: [C1::Scalar; A1],
+        primary_z_0: [Cycle::C1Scalar; A1],
         secondary: &SC2,
-        secondary_z_0: [C2::Scalar; A2],
+        secondary_z_0: [Cycle::C2Scalar; A2],
         num_steps: NonZeroUsize,
     ) -> Result<(), Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<Cycle::C1Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<Cycle::C2Scalar, Config = MainGateConfig<T>>,
     {
         let mut ivc = Self::new(pp, primary, primary_z_0, secondary, secondary_z_0, false)?;
         trace!("IVC created");
@@ -233,18 +245,16 @@ where
 
     #[instrument(name = "ivc_new", skip_all, fields(step = 0))]
     pub fn new<const T: usize, RP1, RP2>(
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
-        primary_z_0: [C1::Scalar; A1],
+        primary_z_0: [Cycle::C1Scalar; A1],
         secondary: &SC2,
-        secondary_z_0: [C2::Scalar; A2],
+        secondary_z_0: [Cycle::C2Scalar; A2],
         debug_mode: bool,
     ) -> Result<Self, Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
-        C1::ScalarExt: WithSmallOrderMulGroup<3>,
-        C2::ScalarExt: WithSmallOrderMulGroup<3>,
+        RP1: ROPair<Cycle::C1Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<Cycle::C2Scalar, Config = MainGateConfig<T>>,
     {
         let primary_span = info_span!("primary").entered();
 
@@ -267,7 +277,7 @@ where
                 ConsistencyMarkerComputation::<
                     '_,
                     A1,
-                    C2,
+                    Cycle::C2,
                     RP1::OffCircuit,
                     { CONSISTENCY_MARKERS_COUNT },
                 > {
@@ -284,10 +294,10 @@ where
             ]
         };
 
-        let primary_sfc = StepFoldingCircuit::<'_, A1, C2, SC1, RP1::OnCircuit, T> {
+        let primary_sfc = StepFoldingCircuit::<'_, A1, Cycle::C2, SC1, RP1::OnCircuit, T> {
             step_circuit: primary,
-            input: StepInputs::<'_, A1, C2, RP1::OnCircuit> {
-                step: C2::Base::ZERO,
+            input: StepInputs::<'_, A1, Cycle::C2, RP1::OnCircuit> {
+                step: <Cycle::C2 as CurveAffine>::Base::ZERO,
                 step_pp: pp.primary.params(),
                 public_params_hash: pp.digest_2(),
                 z_0: primary_z_0,
@@ -295,7 +305,7 @@ where
                 U: secondary_relaxed_trace.U.clone(),
                 u: secondary_pre_round_plonk_trace.u.clone(),
                 cross_term_commits: vec![
-                    C2::identity();
+                    Cycle::C2::identity();
                     pp.secondary.S().get_degree_for_folding().saturating_sub(2)
                 ],
                 step_circuit_instances: primary.instances(),
@@ -328,13 +338,13 @@ where
         .try_collect_witness()?;
 
         let (primary_nifs_pp, _primary_off_circuit_vp) =
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::setup_params(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::setup_params(
                 pp.digest_1(),
                 pp.primary.S().clone(),
             )?;
 
         let primary_plonk_trace =
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::generate_plonk_trace(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::generate_plonk_trace(
                 pp.primary.ck(),
                 &primary_instances,
                 &primary_witness,
@@ -363,7 +373,7 @@ where
                 ConsistencyMarkerComputation::<
                     '_,
                     A2,
-                    C1,
+                    Cycle::C1,
                     RP2::OffCircuit,
                     { CONSISTENCY_MARKERS_COUNT },
                 > {
@@ -380,10 +390,10 @@ where
             ]
         };
 
-        let secondary_sfc = StepFoldingCircuit::<'_, A2, C1, SC2, RP2::OnCircuit, T> {
+        let secondary_sfc = StepFoldingCircuit::<'_, A2, Cycle::C1, SC2, RP2::OnCircuit, T> {
             step_circuit: secondary,
-            input: StepInputs::<'_, A2, C1, RP2::OnCircuit> {
-                step: C1::Base::ZERO,
+            input: StepInputs::<'_, A2, Cycle::C1, RP2::OnCircuit> {
+                step: <Cycle::C1 as CurveAffine>::Base::ZERO,
                 step_pp: pp.secondary.params(),
                 public_params_hash: pp.digest_1(),
                 z_0: secondary_z_0,
@@ -391,7 +401,7 @@ where
                 U: primary_relaxed_trace.U.clone(),
                 u: primary_plonk_trace.u.clone(),
                 cross_term_commits: vec![
-                    C1::identity();
+                    Cycle::C1::identity();
                     primary_nifs_pp
                         .S
                         .get_degree_for_folding()
@@ -456,7 +466,7 @@ where
         };
 
         let (primary_decider_pp, primary_decider_vp) =
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::setup_decider_params(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::setup_decider_params(
                 &primary_nifs_pp,
                 pp.primary.arc_ck(),
                 primary_layout.clone(),
@@ -498,13 +508,13 @@ where
     #[instrument(name = "ivc_fold_step", skip_all, fields(step = self.step))]
     pub fn fold_step<const T: usize, RP1, RP2>(
         &mut self,
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
         primary: &SC1,
         secondary: &SC2,
     ) -> Result<(), Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<<Cycle::C1 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<<Cycle::C2 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
     {
         let primary_span = info_span!("primary").entered();
         debug!("start fold step with folding 'secondary' by 'primary'");
@@ -535,7 +545,7 @@ where
             ConsistencyMarkerComputation::<
                 '_,
                 A1,
-                C2,
+                Cycle::C2,
                 RP1::OffCircuit,
                 { CONSISTENCY_MARKERS_COUNT },
             > {
@@ -553,10 +563,10 @@ where
 
         // --- build SFC + instances ---
         let (primary_sfc, primary_instances) = {
-            let primary_sfc = StepFoldingCircuit::<'_, A1, C2, SC1, RP1::OnCircuit, T> {
+            let primary_sfc = StepFoldingCircuit::<'_, A1, Cycle::C2, SC1, RP1::OnCircuit, T> {
                 step_circuit: primary,
-                input: StepInputs::<'_, A1, C2, RP1::OnCircuit> {
-                    step: C2::Base::from_u128(self.step as u128),
+                input: StepInputs::<'_, A1, Cycle::C2, RP1::OnCircuit> {
+                    step: <Cycle::C2 as CurveAffine>::Base::from_u128(self.step as u128),
                     step_pp: pp.primary.params(),
                     public_params_hash: pp.digest_2(),
                     z_0: self.primary.z_0,
@@ -640,7 +650,7 @@ where
             ConsistencyMarkerComputation::<
                 '_,
                 A2,
-                C1,
+                Cycle::C1,
                 RP2::OffCircuit,
                 { CONSISTENCY_MARKERS_COUNT },
             > {
@@ -658,10 +668,10 @@ where
 
         // --- build SFC + instances (secondary) ---
         let (secondary_sfc, secondary_instances) = {
-            let secondary_sfc = StepFoldingCircuit::<'_, A2, C1, SC2, RP2::OnCircuit, T> {
+            let secondary_sfc = StepFoldingCircuit::<'_, A2, Cycle::C1, SC2, RP2::OnCircuit, T> {
                 step_circuit: secondary,
-                input: StepInputs::<'_, A2, C1, RP2::OnCircuit> {
-                    step: C1::Base::from_u128(self.step as u128),
+                input: StepInputs::<'_, A2, Cycle::C1, RP2::OnCircuit> {
+                    step: <Cycle::C1 as CurveAffine>::Base::from_u128(self.step as u128),
                     step_pp: pp.secondary.params(),
                     public_params_hash: pp.digest_1(),
                     z_0: self.secondary.z_0,
@@ -723,18 +733,18 @@ where
     #[instrument(name = "ivc_verify", skip_all)]
     pub fn verify<const T: usize, RP1, RP2>(
         &mut self,
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
     ) -> Result<(), Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<<Cycle::C1 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<<Cycle::C2 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
     {
         let mut errors = vec![];
 
         ConsistencyMarkerComputation::<
             '_,
             A1,
-            C2,
+            Cycle::C2,
             RP1::OffCircuit,
             { CONSISTENCY_MARKERS_COUNT },
         > {
@@ -747,7 +757,7 @@ where
             limb_width: pp.secondary.params().limb_width(),
             limbs_count: pp.secondary.params().limbs_count(),
         }
-        .generate_with_inspect::<C2::Scalar>(|buf| {
+        .generate_with_inspect::<<Cycle::C2 as PrimeCurveAffine>::Scalar>(|buf| {
             debug!("primary X0 verify at {}-step: {buf:?}", self.step)
         })
         .ne(&get_consistency_marker_input(&self.secondary_trace[0].u))
@@ -761,7 +771,7 @@ where
         ConsistencyMarkerComputation::<
             '_,
             A2,
-            C1,
+            Cycle::C1,
             RP2::OffCircuit,
             { CONSISTENCY_MARKERS_COUNT },
         > {
@@ -774,7 +784,7 @@ where
             limb_width: pp.secondary.params().limb_width(),
             limbs_count: pp.secondary.params().limbs_count(),
         }
-        .generate_with_inspect::<C1::Scalar>(|buf| {
+        .generate_with_inspect::<<Cycle::C1 as PrimeCurveAffine>::Scalar>(|buf| {
             debug!("primary X1 verify at {}-step: {buf:?}", self.step)
         })
         .ne(&get_consistency_marker_output(&self.secondary_trace[0].u))
@@ -831,19 +841,19 @@ where
         }
     }
 
-    pub fn primary_z0(&self) -> &[C1::Scalar; A1] {
+    pub fn primary_z0(&self) -> &[<Cycle::C1 as PrimeCurveAffine>::Scalar; A1] {
         &self.primary.z_0
     }
 
-    pub fn primary_zi(&self) -> &[C1::Scalar; A1] {
+    pub fn primary_zi(&self) -> &[<Cycle::C1 as PrimeCurveAffine>::Scalar; A1] {
         &self.primary.z_i
     }
 
-    pub fn change_zi(&mut self, new_zi: [C1::Scalar; A1]) {
+    pub fn change_zi(&mut self, new_zi: [<Cycle::C1 as PrimeCurveAffine>::Scalar; A1]) {
         self.primary.z_i = new_zi;
     }
 
-    pub fn error(&self) -> C1 {
+    pub fn error(&self) -> Cycle::C1 {
         self.primary.relaxed_trace.U.E_commitment
     }
 }
@@ -860,16 +870,11 @@ fn get_consistency_marker_output<C: CurveAffine>(ins: &FoldablePlonkInstance<C>)
 }
 
 // Decider
-impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
+impl<const A1: usize, const A2: usize, Cycle, SC1, SC2> IVC<A1, A2, Cycle, SC1, SC2>
 where
-    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
-    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
-    C1::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
-    C2::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
-    SC1: StepCircuit<A1, C1::Scalar>,
-    SC2: StepCircuit<A2, C2::Scalar>,
-    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
-    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+    Cycle: IvcCurveCycle,
+    SC1: StepCircuit<A1, <Cycle::C1 as PrimeCurveAffine>::Scalar>,
+    SC2: StepCircuit<A2, <Cycle::C2 as PrimeCurveAffine>::Scalar>,
 {
     /// Produce decider proofs for the final accumulators on both sides.
     ///
@@ -883,18 +888,18 @@ where
     #[instrument(name = "ivc_prove_decider", skip_all)]
     pub fn prove_decider<const T: usize, RP1, RP2>(
         &self,
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
-    ) -> Result<GateDeciderProof<C1>, Error>
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<GateDeciderProof<Cycle::C1>, Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<<Cycle::C1 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<<Cycle::C2 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
     {
         let _primary_span = info_span!("primary").entered();
 
         let mut primary_transcript =
             RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
 
-        let primary_proof = VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+        let primary_proof = VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
             &self.primary_decider_pp,
             &self.primary_layout,
             &self.primary.relaxed_trace,
@@ -927,11 +932,11 @@ where
     #[instrument(name = "ivc_check_gate_decider", skip_all)]
     pub fn check_gate_decider<const T: usize, RP1, RP2>(
         &self,
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
-    ) -> Result<GateDeciderProof<C1>, Error>
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<GateDeciderProof<Cycle::C1>, Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<<Cycle::C1 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<<Cycle::C2 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
     {
         // ----------------------------------------------------------------
         // Primary side: prove then verify.
@@ -946,7 +951,7 @@ where
         let primary_proof = {
             let mut prover_transcript =
                 RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
                 &self.primary_decider_pp,
                 &self.primary_layout,
                 &self.primary.relaxed_trace,
@@ -958,7 +963,7 @@ where
         {
             let mut verifier_transcript =
                 RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::verify_decider(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::verify_decider(
                 &self.primary_decider_vp,
                 &self.primary.relaxed_trace.U,
                 &self.primary.pub_instances,
@@ -1004,22 +1009,33 @@ where
 /// - The final primary z_i (output of the IVC), so the external verifier
 ///   knows what was claimed to be computed.
 /// - The number of steps and the initial z_0, for marker reconstruction.
+#[derive(Serialize)]
+#[serde(bound(serialize = "
+    C1: Serialize,
+    C2: Serialize,
+    C1::ScalarExt: Serialize,
+    C2::ScalarExt: Serialize,
+"))]
 pub struct IvcProofArtifact<const A1: usize, const A2: usize, C1, C2>
 where
-    C1: CurveAffine,
-    C2: CurveAffine,
+    C1: CurveAffine + Serialize,
+    C2: CurveAffine + Serialize,
 {
     // Primary side.
     pub primary_relaxed_instance: nifs::sangria::accumulator::RelaxedPlonkInstance<C1, { CONSISTENCY_MARKERS_COUNT }>,
     pub primary_decider_proof: GateDeciderProof<C1>,
     pub primary_pub_instances: Vec<Instances<C1::Scalar>>,
+    #[serde(with = "serde_arrays")]
     pub primary_z_0: [C1::Scalar; A1],
+    #[serde(with = "serde_arrays")]
     pub primary_z_i: [C1::Scalar; A1],
 
     // Secondary side.
     pub secondary_relaxed_trace: RelaxedPlonkTrace<C2, { CONSISTENCY_MARKERS_COUNT }>,
     pub secondary_pub_instances: Vec<Instances<C2::Scalar>>,
+    #[serde(with = "serde_arrays")]
     pub secondary_z_0: [C2::Scalar; A2],
+    #[serde(with = "serde_arrays")]
     pub secondary_z_i: [C2::Scalar; A2],
 
     // Dangling secondary trace from the final step.
@@ -1029,20 +1045,41 @@ where
     pub num_steps: usize,
 }
 
+impl<const A1: usize, const A2: usize, C1, C2> IvcProofArtifact<A1, A2, C1, C2>
+where
+    C1: CurveAffine + Serialize,
+    <C1 as CurveAffine>::ScalarExt: Serialize,
+    [<C1 as CurveAffine>::ScalarExt; A1]: Serialize,
+    C2: CurveAffine + Serialize,
+    <C2 as CurveAffine>::ScalarExt: Serialize,
+    [<C2 as CurveAffine>::ScalarExt; A2]: Serialize,
+{
+    pub fn get_sizes(&self) -> (usize, usize) {
+        let primary_size = bincode::serialized_size(&self.primary_decider_proof).unwrap()
+            + bincode::serialized_size(&self.primary_relaxed_instance).unwrap()
+            + self.primary_pub_instances.iter().map(|inst| bincode::serialized_size(inst).unwrap()).sum::<u64>()
+            + bincode::serialized_size(&self.primary_z_0).unwrap()
+            + bincode::serialized_size(&self.primary_z_i).unwrap();
+
+        let secondary_size = bincode::serialized_size(&self.secondary_relaxed_trace).unwrap()
+            + self.secondary_pub_instances.iter().map(|inst| bincode::serialized_size(inst).unwrap()).sum::<u64>()
+            + bincode::serialized_size(&self.secondary_z_0).unwrap()
+            + bincode::serialized_size(&self.secondary_z_i).unwrap()
+            + bincode::serialized_size(&self.dangling_secondary_trace).unwrap();
+
+        (primary_size as usize, secondary_size as usize)
+    }
+}
+
 // =====================================================================
 // Producing the artifact
 // =====================================================================
 
-impl<const A1: usize, const A2: usize, C1, C2, SC1, SC2> IVC<A1, A2, C1, C2, SC1, SC2>
+impl<const A1: usize, const A2: usize, Cycle, SC1, SC2> IVC<A1, A2, Cycle, SC1, SC2>
 where
-    C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
-    C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
-    C1::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
-    C2::ScalarExt: Serialize + WithSmallOrderMulGroup<3>,
-    SC1: StepCircuit<A1, C1::Scalar>,
-    SC2: StepCircuit<A2, C2::Scalar>,
-    C1::Base: PrimeFieldBits + FromUniformBytes<64>,
-    C2::Base: PrimeFieldBits + FromUniformBytes<64>,
+    Cycle: IvcCurveCycle,
+    SC1: StepCircuit<A1, <Cycle::C1 as PrimeCurveAffine>::Scalar>,
+    SC2: StepCircuit<A2, <Cycle::C2 as PrimeCurveAffine>::Scalar>,
 {
     /// Produce a self-contained proof artifact that can be verified
     /// externally without access to the original witness or to the
@@ -1053,17 +1090,17 @@ where
     #[instrument(name = "ivc_produce_proof_artifact", skip_all)]
     pub fn produce_proof_artifact<const T: usize, RP1, RP2>(
         &self,
-        pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
-    ) -> Result<IvcProofArtifact<A1, A2, C1, C2>, Error>
+        pp: &PublicParams<A1, A2, T, Cycle::C1, Cycle::C2, SC1, SC2, RP1, RP2>,
+    ) -> Result<IvcProofArtifact<A1, A2, Cycle::C1, Cycle::C2>, Error>
     where
-        RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
-        RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+        RP1: ROPair<<Cycle::C1 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
+        RP2: ROPair<<Cycle::C2 as PrimeCurveAffine>::Scalar, Config = MainGateConfig<T>>,
     {
         let primary_decider_proof = {
             let _s = info_span!("primary_decider").entered();
             let mut transcript =
                 RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
-            VanillaFS::<C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
+            VanillaFS::<Cycle::C1, { CONSISTENCY_MARKERS_COUNT }>::prove_decider(
                 &self.primary_decider_pp,
                 &self.primary_layout,
                 &self.primary.relaxed_trace,
@@ -1110,7 +1147,7 @@ where
 ///   4. The consistency markers connecting the two accumulators and
 ///      the final step's claimed inputs/outputs.
 ///
-/// Returns Ok(()) if everything checks out; otherwise an Error describing
+/// Returns primary and secondary proof sizes if everything checks out; otherwise an Error describing
 /// what failed.
 #[instrument(name = "verify_ivc_externally", skip_all)]
 pub fn verify_ivc_externally<const A1: usize, const A2: usize, const T: usize,
@@ -1118,7 +1155,7 @@ pub fn verify_ivc_externally<const A1: usize, const A2: usize, const T: usize,
     pp: &PublicParams<A1, A2, T, C1, C2, SC1, SC2, RP1, RP2>,
     decider_vp: &GateDeciderVerifierParam<C1>,
     artifact: &IvcProofArtifact<A1, A2, C1, C2>,
-) -> Result<(), Error>
+) -> Result<(usize, usize), Error>
 where
     C1: CurveAffine<Base = <C2 as PrimeCurveAffine>::Scalar> + Serialize,
     C2: CurveAffine<Base = <C1 as PrimeCurveAffine>::Scalar> + Serialize,
@@ -1130,7 +1167,14 @@ where
     C2::Base: PrimeFieldBits + FromUniformBytes<64>,
     RP1: ROPair<C1::Scalar, Config = MainGateConfig<T>>,
     RP2: ROPair<C2::Scalar, Config = MainGateConfig<T>>,
+    [<C1 as CurveAffine>::ScalarExt; A1]: Serialize,
+    [<C2 as CurveAffine>::ScalarExt; A2]: Serialize,
 {
+    let (primary_size, secondary_size) = artifact.get_sizes();
+    let primary_size_kb = primary_size as f64 / 1024.0;
+    let secondary_size_kb = secondary_size as f64 / 1024.0;
+    println!("Artifact sizes: primary = {primary_size_kb:.2} kb, secondary = {secondary_size_kb:.2} kb, total = {:.2} kb", primary_size_kb + secondary_size_kb);
+
     let mut errors = vec![];
 
     // ----------------------------------------------------------------
@@ -1304,7 +1348,7 @@ where
     }
 
     if errors.is_empty() {
-        Ok(())
+        Ok((primary_size, secondary_size))
     } else {
         Err(Error::VerifyFailed(errors))
     }

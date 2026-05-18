@@ -7,6 +7,7 @@ use halo2_proofs::arithmetic::{best_multiexp, CurveAffine, CurveExt};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
+use serde::Serialize;
 
 use crate::{commitment::CommitmentKey, constants::NUM_CHALLENGE_BITS, poseidon::ROTrait};
 
@@ -14,7 +15,11 @@ use crate::{commitment::CommitmentKey, constants::NUM_CHALLENGE_BITS, poseidon::
 // IPA proof structure
 // =====================================================================
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(bound(serialize = "
+    C: Serialize,
+    C::ScalarExt: Serialize,
+"))]
 pub struct IpaProof<C: CurveAffine> {
     /// The (L, R) pairs from each of the log₂(n) rounds.
     pub rounds: Vec<(C, C)>,

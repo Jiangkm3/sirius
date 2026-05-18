@@ -13,10 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use git2::Repository;
 use halo2_proofs::halo2curves;
 use sirius::{
-    ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
-    gadgets::poseidon_step_circuit::TestPoseidonCircuit,
-    ivc::{cyclefold, sangria, step_circuit::trivial, StepCircuit},
-    poseidon::ROPair,
+    cyclefold_prelude::bn256::Bn256Cycle, ff::{FromUniformBytes, PrimeField, PrimeFieldBits}, gadgets::poseidon_step_circuit::TestPoseidonCircuit, ivc::{StepCircuit, cyclefold, sangria, step_circuit::trivial}, poseidon::ROPair
 };
 use tracing::*;
 use tracing_subscriber::{filter::LevelFilter, fmt::format::FmtSpan, EnvFilter};
@@ -368,7 +365,7 @@ fn fold<
 
             let prove_span = info_span!("prove", steps = args.fold_step_count.get()).entered();
 
-            let mut ivc = sangria::IVC::new(
+            let mut ivc = sangria::IVC::<1, 1, Bn256Cycle, _, _>::new(
                 &pp,
                 &primary,
                 [primary_input],

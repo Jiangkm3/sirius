@@ -1,14 +1,11 @@
 use std::{array, num::NonZeroUsize};
 
 use sirius::{
-    ivc::{
-        step_circuit::{trivial, AssignedCell, ConstraintSystem, Layouter},
-        SynthesisError,
-    },
-    sangria_prelude::{
-        bn256::{new_default_pp, C1Affine, C1Scalar, C2Affine, C2Scalar},
-        CommitmentKey, PrimeField, SangriaIVC, StepCircuit,
-    },
+    cyclefold_prelude::bn256::Bn256Cycle, ivc::{
+        SynthesisError, step_circuit::{AssignedCell, ConstraintSystem, Layouter, trivial}
+    }, sangria_prelude::{
+        CommitmentKey, PrimeField, SangriaIVC, StepCircuit, bn256::{C1Affine, C1Scalar, C2Affine, C2Scalar, new_default_pp}
+    }
 };
 
 /// Number of folding steps
@@ -87,7 +84,7 @@ fn main() {
         &sc2,
     );
 
-    SangriaIVC::fold_with_debug_mode(
+    SangriaIVC::<A1, A2, Bn256Cycle, _, _>::fold_with_debug_mode(
         &pp,
         &sc1,
         array::from_fn(|i| C1Scalar::from(i as u64)),

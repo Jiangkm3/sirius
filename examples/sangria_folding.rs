@@ -4,13 +4,11 @@ use halo2_proofs::{
     poly::Rotation,
 };
 use sirius::{
-    fft::CurveAffine,
-    ivc::{
+    cyclefold_prelude::bn256::Bn256Cycle, fft::CurveAffine, ivc::{
         SangriaIVC, StepCircuit, SynthesisError, sangria::incrementally_verifiable_computation::verify_ivc_externally, step_circuit::{AssignedCell, ConstraintSystem, Layouter, trivial}
-    },
-    sangria_prelude::{
+    }, sangria_prelude::{
         CommitmentKey, PrimeField, bn256::{C1Affine, C1Scalar, C2Affine, C2Scalar, new_default_pp}
-    },
+    }
 };
 use std::{array, io, path::Path};
 
@@ -181,7 +179,7 @@ fn main() {
 
     let folding_start = std::time::Instant::now();
     let mut ivc =
-        SangriaIVC::new(&pp, &sc1_template, z0_primary, &sc2, z0_secondary, true).unwrap();
+        SangriaIVC::<ARITY, 1, Bn256Cycle, _, _>::new(&pp, &sc1_template, z0_primary, &sc2, z0_secondary, true).unwrap();
 
     for (i, val) in inputs.into_iter().enumerate() {
         let step_circuit = MyStepCircuit {

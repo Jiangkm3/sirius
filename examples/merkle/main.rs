@@ -24,13 +24,10 @@ mod sirius_mod {
 
     use halo2_proofs::halo2curves::{bn256, grumpkin, CurveAffine};
     use sirius::{
-        commitment::CommitmentKey,
-        ff::Field,
-        group::{prime::PrimeCurve, Group},
-        ivc::{
-            sangria::{CircuitPublicParamsInput, PublicParams, IVC},
+        commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, ff::Field, group::{Group, prime::PrimeCurve}, ivc::{
+            sangria::{CircuitPublicParamsInput, IVC, PublicParams},
             step_circuit::trivial,
-        },
+        }
     };
     use tracing::info_span;
 
@@ -163,7 +160,7 @@ mod sirius_mod {
 
         prepare_span.exit();
 
-        let mut ivc = IVC::new(
+        let mut ivc = IVC::<ARITY, ARITY, Bn256Cycle, _, _>::new(
             &pp,
             &sc1,
             [*Tree::default().get_root()],

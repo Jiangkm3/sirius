@@ -33,17 +33,25 @@ pub mod cyclefold_prelude {
         pub use bn256::G1;
         pub use grumpkin::G1 as G2;
 
-        use crate::halo2curves::{
+        use crate::{halo2curves::{
             bn256,
-            group::{prime::PrimeCurve, Group},
+            group::{Group, prime::PrimeCurve},
             grumpkin,
-        };
+        }, ivc::sangria::incrementally_verifiable_computation::IvcCurveCycle};
 
         pub type C1Affine = <G1 as PrimeCurve>::Affine;
         pub type C2Affine = <G2 as PrimeCurve>::Affine;
 
         pub type C1Scalar = <G1 as Group>::Scalar;
         pub type C2Scalar = <G2 as Group>::Scalar;
+
+        pub struct Bn256Cycle;
+        impl IvcCurveCycle for Bn256Cycle {
+            type C1 = C1Affine;
+            type C2 = C2Affine;
+            type C1Scalar = C1Scalar;
+            type C2Scalar = C2Scalar;
+        }
     }
 
     pub use crate::ivc::cyclefold::{PublicParams, IVC};

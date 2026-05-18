@@ -5,20 +5,12 @@ use criterion::{black_box, criterion_group, Criterion};
 use grumpkin::G1 as C2;
 use metadata::LevelFilter;
 use sirius::{
-    commitment::CommitmentKey,
-    ff::{Field, FromUniformBytes, PrimeFieldBits},
-    group::{prime::PrimeCurve, Group},
-    halo2_proofs::{
+    commitment::CommitmentKey, cyclefold_prelude::bn256::Bn256Cycle, ff::{Field, FromUniformBytes, PrimeFieldBits}, group::{Group, prime::PrimeCurve}, halo2_proofs::{
         circuit::{AssignedCell, Layouter},
         plonk::ConstraintSystem,
-    },
-    halo2curves::{bn256, grumpkin, CurveAffine, CurveExt},
-    ivc::{
-        sangria::{CircuitPublicParamsInput, PublicParams, IVC},
-        step_circuit, StepCircuit, SynthesisError,
-    },
-    main_gate::{MainGate, MainGateConfig, RegionCtx, WrapValue},
-    poseidon::{self, poseidon_circuit::PoseidonChip, ROPair, Spec},
+    }, halo2curves::{CurveAffine, CurveExt, bn256, grumpkin}, ivc::{
+        StepCircuit, SynthesisError, sangria::{CircuitPublicParamsInput, IVC, PublicParams}, step_circuit
+    }, main_gate::{MainGate, MainGateConfig, RegionCtx, WrapValue}, poseidon::{self, ROPair, Spec, poseidon_circuit::PoseidonChip}
 };
 use tracing::*;
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
@@ -161,7 +153,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         let secondary_z_0 = array::from_fn(|_| C2Scalar::random(&mut rnd));
 
         b.iter(|| {
-            IVC::fold(
+            IVC::<ARITY, ARITY, Bn256Cycle, _, _>::fold(
                 &pp,
                 &sc1,
                 black_box(primary_z_0),
