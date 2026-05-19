@@ -1237,7 +1237,6 @@ where
     // not scale with the IVC step count.
     // ----------------------------------------------------------------
     {
-        let decider_start = std::time::Instant::now();
         let _s = info_span!("primary_decider").entered();
         let mut transcript = RP2::OffCircuit::new(pp.secondary.params().ro_constant().clone());
 
@@ -1256,7 +1255,6 @@ where
             });
         })
         .ok();
-        let decider_elapsed = decider_start.elapsed();
     }
 
     // ----------------------------------------------------------------
@@ -1271,7 +1269,6 @@ where
     // so its witness size is one-step-sized).
     // ----------------------------------------------------------------
     {
-        let accumulator_start = std::time::Instant::now();
         let _s = info_span!("secondary_native_is_sat").entered();
 
         if let Err(err) = VanillaFS::<C2, { CONSISTENCY_MARKERS_COUNT }>::is_sat(
@@ -1286,7 +1283,6 @@ where
                 is_relaxed: true,
             }));
         }
-        let accumulator_elapsed = accumulator_start.elapsed();
     }
 
     // ----------------------------------------------------------------
@@ -1297,7 +1293,6 @@ where
     // the secondary's circuit natively (non-relaxed).
     // ----------------------------------------------------------------
     {
-        let dangling_start = std::time::Instant::now();
         let _s = info_span!("dangling_secondary_sps").entered();
 
         if let Err(err) = pp.secondary.S().is_sat(
@@ -1312,7 +1307,6 @@ where
                 is_relaxed: false,
             });
         }
-        let dangling_elapsed = dangling_start.elapsed();
     }
 
     // ----------------------------------------------------------------
@@ -1327,7 +1321,6 @@ where
     // consistency markers, which is where the chain currently terminates.
     // ----------------------------------------------------------------
     {
-        let consistency_start = std::time::Instant::now();
         let _s = info_span!("consistency_markers").entered();
 
         // Primary's expected X0 marker: reconstructed from primary's z_0/z_i + secondary acc.
@@ -1391,7 +1384,6 @@ where
                 is_primary: false,
             });
         }
-        let consistency_elapsed = consistency_start.elapsed();
     }
 
     if errors.is_empty() {
