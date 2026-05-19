@@ -31,16 +31,19 @@ use halo2_proofs::{
     poly::{EvaluationDomain, ExtendedLagrangeCoeff, Polynomial},
 };
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // =====================================================================
 // Decider proof structures
 // =====================================================================
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     C: Serialize,
     C::ScalarExt: Serialize,
+"), bound(deserialize = "
+    C: Deserialize<'de>,
+    C::ScalarExt: Deserialize<'de>,
 "))]
 pub struct GateDeciderProof<C: CurveAffine> {
     pub t_commitments: Vec<C>,
@@ -69,9 +72,11 @@ pub(crate) struct OpeningEntry<'a, C: CurveAffine> {
 
 /// Evaluations of all polynomials at the challenge point `ζ` (and `ζω` for
 /// polynomials with non-zero rotations referenced by the gate expression).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     F: Serialize,
+"), bound(deserialize = "
+    F: Deserialize<'de>,
 "))]
 pub struct GateEvaluations<F: PrimeField> {
     pub queries: Vec<F>,

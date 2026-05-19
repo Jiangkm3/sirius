@@ -178,6 +178,7 @@ fn main() {
     ];
 
     let folding_start = std::time::Instant::now();
+    let (primary_decider_pp, primary_decider_vp) = SangriaIVC::<ARITY, 1, Bn256Cycle, _, _>::decider_setup(&pp).unwrap();
     let mut ivc =
         SangriaIVC::<ARITY, 1, Bn256Cycle, _, _>::new(&pp, &sc1_template, z0_primary, &sc2, z0_secondary, true).unwrap();
 
@@ -194,7 +195,7 @@ fn main() {
 
     // After folding completes:
     let deciding_start = std::time::Instant::now();
-    let artifact = ivc.produce_proof_artifact(&pp).unwrap();
+    let artifact = ivc.produce_proof_artifact(&pp, &primary_decider_pp).unwrap();
     let deciding_elapsed = deciding_start.elapsed();
     println!("Deciding time: {} ms", deciding_elapsed.as_millis());
 
@@ -205,9 +206,10 @@ fn main() {
     println!("Satisfiability check time: {} ms", sat_elapsed.as_millis());
 
     // Succinct checker
-    let decider_vp = &ivc.primary_decider_vp;
     let verifying_start = std::time::Instant::now();
-    verify_ivc_externally(&pp, decider_vp, &artifact).expect("Verification failed");
+    let (primary_size, secondary_size) = artifact.get_sizes();
+    println!("Primary size: {} kb, Secondary size: {} kb, Total size: {} kb", primary_size as f64 / 1024.0, secondary_size as f64 / 1024.0, (primary_size + secondary_size) as f64 / 1024.0);
+    verify_ivc_externally(&pp, &primary_decider_vp, &artifact).expect("Verification failed");
     let verifying_elapsed = verifying_start.elapsed();
     println!("Verifying time: {} ms", verifying_elapsed.as_millis());
 

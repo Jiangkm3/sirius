@@ -15,7 +15,7 @@ use count_to_non_zero::*;
 use halo2_proofs::arithmetic::CurveAffine;
 use itertools::Itertools;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use some_to_err::*;
 use tracing::{debug, info, info_span, instrument, warn};
 
@@ -160,10 +160,13 @@ pub struct PlonkStructure<F: PrimeField> {
     pub(crate) lookup_arguments: Option<lookup::Arguments<F>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     C: Serialize,
     C::ScalarExt: Serialize,
+"), bound(deserialize = "
+    C: Deserialize<'de>,
+    C::ScalarExt: Deserialize<'de>,
 "))]
 pub struct PlonkInstance<C: CurveAffine> {
     /// `W_commitments = round_sizes.len()`, see [`PlonkStructure::round_sizes`]
@@ -179,7 +182,7 @@ pub struct PlonkInstance<C: CurveAffine> {
     pub(crate) challenges: Vec<C::ScalarExt>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PlonkWitness<F: PrimeField> {
     /// length of W equals number of prover rounds, see [`PlonkStructure`]
     pub(crate) W: Vec<Vec<F>>,

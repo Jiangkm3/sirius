@@ -9,7 +9,7 @@ use halo2_proofs::{
 };
 use itertools::Itertools;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
 
 use super::{GetConsistencyMarkers, GetStepCircuitInstances, CONSISTENCY_MARKERS_COUNT};
@@ -31,7 +31,7 @@ use crate::{
 ///
 /// This will make it easier to use sangria IVC code in other IVCs, instead of calculating a chain
 /// of hashes from empty sets.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SCInstancesHashAcc<F> {
     /// If StepCircuit does not possess sc_instances will be None
     None,
@@ -86,7 +86,7 @@ impl<F> SCInstancesHashAcc<F> {
 ///
 /// `MARKERS_LEN` - the first column of instance is folded separately, the length of this column is
 /// regulated by this parameter
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelaxedPlonkInstance<
     C: CurveAffine,
     const MARKERS_LEN: usize = CONSISTENCY_MARKERS_COUNT,
@@ -271,10 +271,13 @@ where
 }
 
 // TODO #31 docs
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     C: Serialize,
     C::ScalarExt: Serialize,
+"), bound(deserialize = "
+    C: Deserialize<'de>,
+    C::ScalarExt: Deserialize<'de>,
 "))]
 pub struct RelaxedPlonkTrace<C: CurveAffine, const MARKERS_LEN: usize = CONSISTENCY_MARKERS_COUNT> {
     pub U: RelaxedPlonkInstance<C, MARKERS_LEN>,
@@ -415,10 +418,13 @@ impl<F: PrimeField> RelaxedPlonkWitness<F> {
 ///
 /// # Consistency Markers
 /// - Ensures that `instances.first().len() == MARKERS_LEN` for `PlonkInstance`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     C: Serialize,
     C::ScalarExt: Serialize,
+"), bound(deserialize = "
+    C: Deserialize<'de>,
+    C::ScalarExt: Deserialize<'de>,
 "))]
 pub struct FoldablePlonkInstance<
     C: CurveAffine,
@@ -455,10 +461,13 @@ impl<C: CurveAffine, const MARKERS_LEN: usize> DerefMut for FoldablePlonkInstanc
 ///
 /// # Consistency Markers
 /// - Contains a `FoldablePlonkInstance` and a `PlonkWitness`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "
     C: Serialize,
     C::ScalarExt: Serialize,
+"), bound(deserialize = "
+    C: Deserialize<'de>,
+    C::ScalarExt: Deserialize<'de>,
 "))]
 pub struct FoldablePlonkTrace<C: CurveAffine, const MARKERS_LEN: usize = CONSISTENCY_MARKERS_COUNT>
 {
@@ -495,7 +504,7 @@ impl<C: CurveAffine, const MARKERS_LEN: usize> FoldablePlonkTrace<C, MARKERS_LEN
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelaxedPlonkWitness<F: PrimeField> {
     /// each vector element in W is a vector folded from an old [`RelaxedPlonkWitness.W`] and [`PlonkWitness.W`]
     pub(crate) inner: PlonkWitness<F>,
